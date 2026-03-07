@@ -1,0 +1,57 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2024-01-01 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "integrations_section",
+  "enable_magento_integration",
+  "column_break_1",
+  "enable_erpnext_site_sync"
+ ],
+ "fields": [
+  {
+   "fieldname": "integrations_section",
+   "fieldtype": "Section Break",
+   "label": "Integration Modules"
+  },
+  {
+   "default": "1",
+   "fieldname": "enable_magento_integration",
+   "fieldtype": "Check",
+   "label": "Enable Magento Integration",
+   "description": "When unchecked, all Magento sync operations (products, orders, inventory, images, status) are paused"
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_erpnext_site_sync",
+   "fieldtype": "Check",
+   "label": "Enable ERPNext Site Sync",
+   "description": "When checked, product sync between this site and configured remote ERPNext sites is enabled"
+  }
+ ],
+ "issingle": 1,
+ "links": [],
+ "modified": "2024-01-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Connector",
+ "name": "Connector Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 1
+}

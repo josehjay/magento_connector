@@ -1,0 +1,185 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2024-01-01 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "connection_section",
+  "magento_url",
+  "use_integration_token",
+  "column_break_1",
+  "admin_username",
+  "admin_password",
+  "access_token",
+  "store_section",
+  "magento_store_code",
+  "magento_website_id",
+  "column_break_2",
+  "price_list",
+  "lead_time_days",
+  "item_group_filter_section",
+  "magento_item_groups",
+  "sync_section",
+  "sync_enabled",
+  "last_order_sync_time",
+  "column_break_3",
+  "token_expiry",
+  "cached_token"
+ ],
+ "fields": [
+  {
+   "fieldname": "connection_section",
+   "fieldtype": "Section Break",
+   "label": "Magento Connection"
+  },
+  {
+   "fieldname": "magento_url",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Magento Store URL",
+   "reqd": 1,
+   "description": "Base URL of your Magento store, e.g. https://store.example.com (no trailing slash)"
+  },
+  {
+   "default": "1",
+   "fieldname": "use_integration_token",
+   "fieldtype": "Check",
+   "label": "Use Integration Access Token",
+   "description": "If checked, use the Access Token below instead of username/password"
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "depends_on": "eval:!doc.use_integration_token",
+   "fieldname": "admin_username",
+   "fieldtype": "Data",
+   "label": "Admin Username"
+  },
+  {
+   "depends_on": "eval:!doc.use_integration_token",
+   "fieldname": "admin_password",
+   "fieldtype": "Password",
+   "label": "Admin Password"
+  },
+  {
+   "depends_on": "eval:doc.use_integration_token",
+   "fieldname": "access_token",
+   "fieldtype": "Password",
+   "label": "Integration Access Token",
+   "description": "Pre-generated access token from Magento Admin > System > Integrations"
+  },
+  {
+   "fieldname": "store_section",
+   "fieldtype": "Section Break",
+   "label": "Store Configuration"
+  },
+  {
+   "default": "default",
+   "fieldname": "magento_store_code",
+   "fieldtype": "Data",
+   "label": "Store Code",
+   "description": "Magento store view code (usually 'default')"
+  },
+  {
+   "default": "1",
+   "fieldname": "magento_website_id",
+   "fieldtype": "Int",
+   "label": "Website ID"
+  },
+  {
+   "fieldname": "column_break_2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "price_list",
+   "fieldtype": "Link",
+   "label": "ERPNext Price List",
+   "options": "Price List",
+   "reqd": 1,
+   "description": "Price list used as source for product prices synced to Magento"
+  },
+  {
+   "fieldname": "item_group_filter_section",
+   "fieldtype": "Section Break",
+   "label": "Item Group Filter",
+   "description": "Choose which Item Groups to sync to Magento. Leave empty to sync all items with 'Sync to Magento' checked."
+  },
+  {
+   "fieldname": "magento_item_groups",
+   "fieldtype": "Table",
+   "label": "Item Groups to Sync",
+   "options": "Magento Item Group",
+   "description": "Only items belonging to these groups will be synced to Magento. If empty, all groups are included."
+  },
+  {
+   "default": "3",
+   "fieldname": "lead_time_days",
+   "fieldtype": "Int",
+   "label": "Order Lead Time (Days)",
+   "description": "Number of days added to order date to set ERPNext delivery date"
+  },
+  {
+   "fieldname": "sync_section",
+   "fieldtype": "Section Break",
+   "label": "Sync Status"
+  },
+  {
+   "default": "1",
+   "fieldname": "sync_enabled",
+   "fieldtype": "Check",
+   "label": "Enable Sync",
+   "description": "Master switch — uncheck to pause all sync operations"
+  },
+  {
+   "fieldname": "last_order_sync_time",
+   "fieldtype": "Datetime",
+   "label": "Last Order Sync Time",
+   "read_only": 1,
+   "description": "Automatically updated after each order sync run"
+  },
+  {
+   "fieldname": "column_break_3",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "token_expiry",
+   "fieldtype": "Datetime",
+   "label": "Admin Token Expiry",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cached_token",
+   "fieldtype": "Password",
+   "label": "Cached Admin Token",
+   "read_only": 1,
+   "hidden": 1
+  }
+ ],
+ "issingle": 1,
+ "links": [],
+ "modified": "2024-01-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Connector",
+ "name": "Magento Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 1
+}

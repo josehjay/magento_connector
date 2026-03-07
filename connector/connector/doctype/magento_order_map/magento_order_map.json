@@ -1,0 +1,78 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "format:MOM-{magento_order_id}",
+ "creation": "2024-01-01 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "magento_order_id",
+  "magento_increment_id",
+  "magento_status",
+  "column_break_1",
+  "sales_order",
+  "imported_on",
+  "last_status_sync"
+ ],
+ "fields": [
+  {
+   "fieldname": "magento_order_id",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Magento Order ID",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "magento_increment_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Magento Order #"
+  },
+  {
+   "fieldname": "magento_status",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Magento Status"
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "sales_order",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "ERPNext Sales Order",
+   "options": "Sales Order"
+  },
+  {
+   "fieldname": "imported_on",
+   "fieldtype": "Datetime",
+   "label": "Imported On"
+  },
+  {
+   "fieldname": "last_status_sync",
+   "fieldtype": "Datetime",
+   "label": "Last Status Sync"
+  }
+ ],
+ "links": [],
+ "modified": "2024-01-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Connector",
+ "name": "Magento Order Map",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "role": "System Manager",
+   "write": 1,
+   "create": 1,
+   "delete": 1
+  }
+ ],
+ "sort_field": "imported_on",
+ "sort_order": "DESC",
+ "track_changes": 0
+}

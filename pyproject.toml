@@ -1,0 +1,20 @@
+[build-system]
+requires = ["flit_core >=3.4,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "connector"
+authors = [
+    {name = "Bookspot", email = "info@bookspot.co.ke"}
+]
+description = "ERPNext integration connector — Magento, multi-site ERPNext sync, and more"
+requires-python = ">=3.11"
+readme = "README.md"
+dynamic = ["version"]
+dependencies = [
+    "frappe",
+    "requests>=2.28.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourorg/connector"

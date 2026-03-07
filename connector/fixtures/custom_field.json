@@ -1,0 +1,130 @@
+[
+  {
+    "doctype": "Custom Field",
+    "dt": "Item",
+    "fieldname": "magento_section_break",
+    "fieldtype": "Section Break",
+    "label": "Magento Integration",
+    "insert_after": "website_specifications",
+    "collapsible": 1,
+    "collapsible_depends_on": "eval:doc.magento_product_id"
+  },
+  {
+    "doctype": "Custom Field",
+    "dt": "Item",
+    "fieldname": "sync_to_magento",
+    "fieldtype": "Check",
+    "label": "Sync to Magento",
+    "insert_after": "magento_section_break",
+    "default": "1",
+    "description": "When checked, this item will be pushed to Magento automatically"
+  },
+  {
+    "doctype": "Custom Field",
+    "dt": "Item",
+    "fieldname": "magento_product_id",
+    "fieldtype": "Int",
+    "label": "Magento Product ID",
+    "insert_after": "sync_to_magento",
+    "read_only": 1,
+    "in_list_view": 1,
+    "in_standard_filter": 1
+  },
+  {
+    "doctype": "Custom Field",
+    "dt": "Item",
+    "fieldname": "magento_last_synced_on",
+    "fieldtype": "Datetime",
+    "label": "Last Synced to Magento",
+    "insert_after": "magento_product_id",
+    "read_only": 1
+  },
+  {
+    "doctype": "Custom Field",
+    "dt": "Item",
+    "fieldname": "magento_sync_error",
+    "fieldtype": "Small Text",
+    "label": "Last Magento Sync Error",
+    "insert_after": "magento_last_synced_on",
+    "read_only": 1,
+    "depends_on": "eval:doc.magento_sync_error"
+  },
+  {
+    "doctype": "Custom Field",
+    "dt": "Item",
+    "fieldname": "erpnext_sync_section_break",
+    "fieldtype": "Section Break",
+    "label": "ERPNext Site Sync",
+    "insert_after": "magento_sync_error",
+    "collapsible": 1
+  },
+  {
+    "doctype": "Custom Field",
+    "dt": "Item",
+    "fieldname": "sync_to_erpnext_sites",
+    "fieldtype": "Check",
+    "label": "Sync to ERPNext Sites",
+    "insert_after": "erpnext_sync_section_break",
+    "default": "0",
+    "description": "When checked, this item will be pushed to all enabled remote ERPNext sites"
+  },
+  {
+    "doctype": "Custom Field",
+    "dt": "Sales Order",
+    "fieldname": "magento_so_section_break",
+    "fieldtype": "Section Break",
+    "label": "Magento Order Details",
+    "insert_after": "terms",
+    "collapsible": 1,
+    "collapsible_depends_on": "eval:doc.magento_order_id"
+  },
+  {
+    "doctype": "Custom Field",
+    "dt": "Sales Order",
+    "fieldname": "magento_order_id",
+    "fieldtype": "Int",
+    "label": "Magento Order ID",
+    "insert_after": "magento_so_section_break",
+    "read_only": 1
+  },
+  {
+    "doctype": "Custom Field",
+    "dt": "Sales Order",
+    "fieldname": "magento_increment_id",
+    "fieldtype": "Data",
+    "label": "Magento Order #",
+    "insert_after": "magento_order_id",
+    "read_only": 1,
+    "in_list_view": 1
+  },
+  {
+    "doctype": "Custom Field",
+    "dt": "Sales Order",
+    "fieldname": "magento_order_status",
+    "fieldtype": "Data",
+    "label": "Magento Status",
+    "insert_after": "magento_increment_id",
+    "read_only": 1,
+    "in_list_view": 1
+  },
+  {
+    "doctype": "Custom Field",
+    "dt": "Customer",
+    "fieldname": "magento_customer_section_break",
+    "fieldtype": "Section Break",
+    "label": "Magento",
+    "insert_after": "customer_primary_contact",
+    "collapsible": 1
+  },
+  {
+    "doctype": "Custom Field",
+    "dt": "Customer",
+    "fieldname": "magento_customer_id",
+    "fieldtype": "Int",
+    "label": "Magento Customer ID",
+    "insert_after": "magento_customer_section_break",
+    "read_only": 1,
+    "in_list_view": 0,
+    "in_standard_filter": 1
+  }
+]

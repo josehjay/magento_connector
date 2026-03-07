@@ -1,0 +1,113 @@
+{
+ "actions": [],
+ "autoname": "field:site_name",
+ "creation": "2024-01-01 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "site_name",
+  "site_url",
+  "column_break_conn",
+  "api_key",
+  "api_secret",
+  "sync_section",
+  "enable_sync",
+  "price_list",
+  "column_break_sync",
+  "last_product_sync",
+  "sync_item_group_filter"
+ ],
+ "fields": [
+  {
+   "fieldname": "site_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Site Name",
+   "reqd": 1,
+   "unique": 1,
+   "description": "A friendly label for this remote site, e.g. 'Production' or 'Warehouse ERP'"
+  },
+  {
+   "fieldname": "site_url",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Site URL",
+   "reqd": 1,
+   "description": "Full URL of the remote ERPNext site, e.g. https://erp.example.com (no trailing slash)"
+  },
+  {
+   "fieldname": "column_break_conn",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "api_key",
+   "fieldtype": "Password",
+   "label": "API Key",
+   "reqd": 1,
+   "description": "From the remote site: User → API Access → Generate Keys"
+  },
+  {
+   "fieldname": "api_secret",
+   "fieldtype": "Password",
+   "label": "API Secret",
+   "reqd": 1,
+   "description": "The API Secret generated alongside the API Key"
+  },
+  {
+   "fieldname": "sync_section",
+   "fieldtype": "Section Break",
+   "label": "Sync Configuration"
+  },
+  {
+   "default": "1",
+   "fieldname": "enable_sync",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enable Sync",
+   "description": "Uncheck to pause sync to this specific site"
+  },
+  {
+   "fieldname": "price_list",
+   "fieldtype": "Link",
+   "label": "Price List",
+   "options": "Price List",
+   "description": "Optional: use this price list when pushing product prices to this site. Leave blank to use standard_rate."
+  },
+  {
+   "fieldname": "column_break_sync",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "last_product_sync",
+   "fieldtype": "Datetime",
+   "label": "Last Product Sync",
+   "read_only": 1,
+   "description": "Automatically updated after each sync run"
+  },
+  {
+   "fieldname": "sync_item_group_filter",
+   "fieldtype": "Link",
+   "label": "Sync Only Item Group",
+   "options": "Item Group",
+   "description": "If set, only items in this group are synced to this site. Leave blank to sync all items with 'Sync to ERPNext Sites' checked."
+  }
+ ],
+ "links": [],
+ "modified": "2024-01-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Connector",
+ "name": "Remote ERPNext Site",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 1
+}
