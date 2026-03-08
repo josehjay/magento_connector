@@ -68,6 +68,10 @@ scheduler_events = {
         "*/30 * * * *": [
             "connector.tasks.sync_images",
         ],
+        # Retry recently-failed products (with exponential backoff) every 30 minutes
+        "*/30 * * * *": [
+            "connector.tasks.retry_failed_product_sync",
+        ],
         # Full product catch-up sync every hour
         "0 * * * *": [
             "connector.tasks.full_product_sync",

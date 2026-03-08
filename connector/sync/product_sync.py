@@ -2,8 +2,17 @@
 Product Sync: ERPNext Item → Magento Product
 
 Triggered by:
-  - Item.after_insert / Item.on_update  (real-time, via hooks.py)
+  - Item.after_insert / Item.on_update  (real-time, deduplicated by job_name)
   - tasks.full_product_sync()           (hourly catch-up, scheduled)
+  - tasks.retry_failed_product_sync()   (every 30 min, retries failed items with backoff)
+
+Retry strategy (exponential backoff):
+  retry_count 1 → wait  5 min before retry
+  retry_count 2 → wait 10 min
+  retry_count 3 → wait 20 min
+  retry_count 4 → wait 40 min
+  retry_count 5+ → wait 60 min (capped)
+  retry_count > MAX_RETRIES → item is skipped until manually triggered or item is re-saved
 """
 
 import frappe
@@ -17,9 +26,19 @@ from connector.connector.doctype.magento_sync_log.magento_sync_log import (
     create_log,
 )
 
+# Items that have failed more than this many times are not retried automatically.
+# They are only retried when the item is explicitly saved or manually triggered.
+MAX_RETRIES = 10
+
+# Number of items per batch job sent to the `long` queue.
+BATCH_SIZE = 50
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _is_magento_enabled():
-    """Return True if Magento integration is enabled in Connector Settings."""
     try:
         return bool(frappe.db.get_single_value("Connector Settings", "enable_magento_integration"))
     except Exception:
@@ -27,24 +46,17 @@ def _is_magento_enabled():
 
 
 def _is_sync_enabled():
-    """Return True if the global sync switch is on and Magento is enabled."""
     if not _is_magento_enabled():
         return False
     return bool(frappe.db.get_single_value("Magento Settings", "sync_enabled"))
 
 
 def _get_allowed_item_groups():
-    """
-    Return the set of item groups configured in Magento Settings, or an empty
-    set if no filter is configured (meaning all groups are allowed).
-    """
     settings = frappe.get_single("Magento Settings")
-    groups = {row.item_group for row in (settings.magento_item_groups or [])}
-    return groups
+    return {row.item_group for row in (settings.magento_item_groups or [])}
 
 
 def _is_item_group_allowed(item_group):
-    """Return True if the item's group is in the allowed list (or no filter is set)."""
     allowed = _get_allowed_item_groups()
     if not allowed:
         return True
@@ -52,7 +64,6 @@ def _is_item_group_allowed(item_group):
 
 
 def _get_item_price(item_code, price_list):
-    """Fetch the selling price for an item from the configured price list."""
     price = frappe.db.get_value(
         "Item Price",
         {"item_code": item_code, "price_list": price_list, "selling": 1},
@@ -64,7 +75,7 @@ def _get_item_price(item_code, price_list):
 def _get_attribute_set_for_item_group(item_group):
     """
     Return Magento attribute_set_id for the given Item Group from Magento Settings.
-    If the Item Group is in magento_item_groups with an attribute_set_id, use it; else 4.
+    Falls back to 4 (Magento default) if not configured.
     """
     settings = frappe.get_single("Magento Settings")
     for row in settings.magento_item_groups or []:
@@ -76,25 +87,26 @@ def _get_attribute_set_for_item_group(item_group):
     return 4
 
 
+def _backoff_minutes(retry_count):
+    """Return minutes to wait before retrying. Capped at 60 minutes."""
+    if retry_count <= 0:
+        return 0
+    return min(5 * (2 ** (retry_count - 1)), 60)
+
+
 def _build_product_payload(doc):
     """
     Convert an ERPNext Item doc into a Magento product payload dict.
     Attribute set comes from Magento Settings → Item Group mapping.
-    Does NOT set stock — inventory is managed by inventory_sync.py.
-    When Item is disabled, status is set to 2 (Disabled) in Magento.
+    Stock is managed separately by inventory_sync.py.
+    Disabled items sync as status=2 (Disabled) in Magento.
     """
     settings = frappe.get_single("Magento Settings")
-    price_list = settings.price_list
-    price = _get_item_price(doc.item_code, price_list)
-
+    price = _get_item_price(doc.item_code, settings.price_list)
     description = doc.description or doc.item_name or ""
     attribute_set_id = _get_attribute_set_for_item_group(doc.item_group or "")
 
-    # Disabled items sync as status=2 (Disabled) in Magento
-    if doc.get("disabled"):
-        status = 2
-    else:
-        status = 1 if doc.is_sales_item else 2
+    status = 2 if doc.get("disabled") else (1 if doc.is_sales_item else 2)
 
     payload = {
         "sku": doc.item_code,
@@ -123,12 +135,18 @@ def _build_product_payload(doc):
     return payload
 
 
+# ---------------------------------------------------------------------------
+# Doc event hook (real-time, called on every Item save)
+# ---------------------------------------------------------------------------
+
 def on_item_save(doc, method):
     """
-    Hook called on Item after_insert and on_update.
-    - If sync_to_magento is set: push to Magento (when enabled and group allowed).
-    - If sync_to_magento is unchecked and item was synced: remove from Magento, map, and clear Item fields.
-    Non-blocking — errors are logged but never raised to the user.
+    Hook: Item after_insert / on_update.
+    - Deselected sync_to_magento → remove from Magento and map.
+    - Enabled sync_to_magento + allowed group → enqueue push (deduplicated).
+
+    Uses enqueue_after_commit=True so the job always sees committed data,
+    and job_name to prevent duplicate queue entries for the same item.
     """
     if not _is_sync_enabled():
         return
@@ -139,9 +157,12 @@ def on_item_save(doc, method):
                 "connector.sync.product_sync.remove_from_magento",
                 queue="default",
                 timeout=60,
+                job_name=f"magento_remove_{doc.item_code}",
+                enqueue_after_commit=True,
                 item_code=doc.item_code,
             )
         return
+
     if not _is_item_group_allowed(doc.item_group):
         return
 
@@ -149,14 +170,20 @@ def on_item_save(doc, method):
         "connector.sync.product_sync.push_item_to_magento",
         queue="default",
         timeout=120,
+        job_name=f"magento_product_sync_{doc.item_code}",
+        enqueue_after_commit=True,
         item_code=doc.item_code,
     )
 
 
+# ---------------------------------------------------------------------------
+# Remove product from Magento
+# ---------------------------------------------------------------------------
+
 def remove_from_magento(item_code):
     """
-    When user deselects Sync to Magento: disable product in Magento, delete map entry,
-    clear magento_product_id and related fields on Item.
+    When user deselects Sync to Magento: disable the product in Magento,
+    delete the map entry, and clear the Magento fields on the Item doc.
     """
     magento_id = get_magento_product_id(item_code)
     if not magento_id:
@@ -167,11 +194,12 @@ def remove_from_magento(item_code):
             client.delete_product(item_code)
         except MagentoAPIError as e:
             if e.status_code == 404:
-                pass
+                pass  # already gone
             else:
                 client.update_product(item_code, {"status": 2})
-    except Exception as e:
+    except Exception:
         frappe.log_error(frappe.get_traceback(), "Connector: Remove from Magento")
+
     delete_map(item_code)
     frappe.db.set_value(
         "Item",
@@ -192,11 +220,16 @@ def remove_from_magento(item_code):
     )
 
 
+# ---------------------------------------------------------------------------
+# Single-item push (called directly or from a batch job)
+# ---------------------------------------------------------------------------
+
 @frappe.whitelist()
 def push_item_to_magento(item_code):
     """
-    Push a single ERPNext item to Magento.
-    Can be called directly or via frappe.enqueue.
+    Push a single ERPNext Item to Magento.
+    On success: resets the retry counter.
+    On failure: increments retry counter and records last_failed_at for backoff.
     """
     if not _is_sync_enabled():
         return
@@ -217,17 +250,22 @@ def push_item_to_magento(item_code):
 
         if existing_magento_id:
             result = client.update_product(item_code, payload)
-            operation = "Product Push"
+        elif client.product_exists(item_code):
+            result = client.update_product(item_code, payload)
         else:
-            if client.product_exists(item_code):
-                result = client.update_product(item_code, payload)
-            else:
-                result = client.create_product(payload)
-            operation = "Product Push"
+            result = client.create_product(payload)
 
         magento_product_id = result.get("id")
 
-        upsert_map(item_code, magento_product_id, item_code, "Synced")
+        # Success — persist map entry with reset retry counter
+        upsert_map(
+            item_code,
+            magento_product_id,
+            item_code,
+            status="Synced",
+            retry_count=0,
+            last_failed_at=None,
+        )
 
         frappe.db.set_value(
             "Item",
@@ -241,7 +279,7 @@ def push_item_to_magento(item_code):
         frappe.db.commit()
 
         create_log(
-            operation=operation,
+            operation="Product Push",
             status="Success",
             doctype_name="Item",
             document_name=item_code,
@@ -250,44 +288,93 @@ def push_item_to_magento(item_code):
             response_payload=result,
         )
 
-    except MagentoAPIError as e:
-        error_msg = str(e)
-        frappe.db.set_value("Item", item_code, "magento_sync_error", error_msg[:500])
-        frappe.db.commit()
-        create_log(
-            operation="Product Push",
-            status="Failed",
-            doctype_name="Item",
-            document_name=item_code,
-            error_message=error_msg,
-            request_payload=payload,
-        )
-        upsert_map(item_code, get_magento_product_id(item_code) or 0, item_code, "Failed")
+    except (MagentoAPIError, Exception) as e:
+        _handle_push_failure(item_code, e, payload)
 
-    except Exception as e:
+
+def _handle_push_failure(item_code, exc, payload=None):
+    """
+    Record a failed sync attempt. Increments retry_count and sets last_failed_at
+    so the retry scheduler can calculate the correct backoff window.
+    """
+    error_msg = str(exc)
+    is_api_error = isinstance(exc, MagentoAPIError)
+
+    if not is_api_error:
         frappe.log_error(frappe.get_traceback(), "Magento Product Sync Error")
-        create_log(
-            operation="Product Push",
-            status="Failed",
-            doctype_name="Item",
-            document_name=item_code,
-            error_message=str(e),
-        )
+
+    # Read current retry count from map (may not exist yet for first-time failures)
+    current = frappe.db.get_value(
+        "Magento Product Map",
+        item_code,
+        ["retry_count", "magento_product_id"],
+        as_dict=True,
+    ) or {}
+    new_retry_count = (current.get("retry_count") or 0) + 1
+    now = frappe.utils.now_datetime()
+
+    upsert_map(
+        item_code,
+        current.get("magento_product_id") or 0,
+        item_code,
+        status="Failed",
+        retry_count=new_retry_count,
+        last_failed_at=now,
+    )
+
+    frappe.db.set_value("Item", item_code, "magento_sync_error", error_msg[:500])
+    frappe.db.commit()
+
+    create_log(
+        operation="Product Push",
+        status="Failed",
+        doctype_name="Item",
+        document_name=item_code,
+        error_message=error_msg,
+        request_payload=payload,
+    )
 
 
-BATCH_SIZE_PRODUCT_SYNC = 40
+# ---------------------------------------------------------------------------
+# Batch processor (called by both full_product_sync and retry_failed_product_sync)
+# ---------------------------------------------------------------------------
 
+def _run_batch_product_sync(item_codes):
+    """
+    Process a list of item_codes sequentially within a single background job.
+    Each item failure is isolated — one bad item cannot stop the rest.
+    """
+    logger = frappe.logger("connector")
+    success = failed = 0
+    for item_code in item_codes:
+        try:
+            push_item_to_magento(item_code)
+            success += 1
+        except Exception as e:
+            failed += 1
+            frappe.log_error(
+                f"Batch sync failed for {item_code}: {e}",
+                "Connector Product Sync Batch",
+            )
+    logger.info(f"_run_batch_product_sync: {success} ok, {failed} failed out of {len(item_codes)}")
+
+
+# ---------------------------------------------------------------------------
+# Scheduled: full catch-up sync (hourly)
+# ---------------------------------------------------------------------------
 
 def full_product_sync():
     """
-    Hourly catch-up: sync all Items that are stale or have never been synced.
-    Processes items in batches to avoid queue overload (QueueOverloaded).
+    Hourly catch-up: find all Items that are stale or have never been synced
+    and dispatch them in BATCH_SIZE chunks to the `long` queue.
+
+    Deduplication: each batch job uses a stable job_name so re-runs of
+    full_product_sync cannot pile up duplicate jobs in the queue.
     """
     if not _is_sync_enabled():
         return
 
     filters = {"sync_to_magento": 1}
-
     allowed_groups = _get_allowed_item_groups()
     if allowed_groups:
         filters["item_group"] = ["in", list(allowed_groups)]
@@ -306,31 +393,96 @@ def full_product_sync():
     ]
 
     if not to_sync:
-        frappe.logger("connector").info("full_product_sync: no stale items to sync.")
+        frappe.logger("connector").info("full_product_sync: nothing stale to sync.")
         return
 
-    for start in range(0, len(to_sync), BATCH_SIZE_PRODUCT_SYNC):
-        batch = to_sync[start : start + BATCH_SIZE_PRODUCT_SYNC]
+    _dispatch_batches(to_sync, job_prefix="magento_full_sync_batch")
+    frappe.logger("connector").info(
+        f"full_product_sync: dispatched {len(to_sync)} items in batches of {BATCH_SIZE}."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scheduled: retry failed products (every 30 minutes)
+# ---------------------------------------------------------------------------
+
+def retry_failed_product_sync():
+    """
+    Retry products that have a 'Failed' map entry and whose exponential backoff
+    window has expired. Items that have exceeded MAX_RETRIES are skipped until
+    they are explicitly re-saved or manually triggered.
+    """
+    if not _is_sync_enabled():
+        return
+
+    failed_maps = frappe.get_all(
+        "Magento Product Map",
+        filters={"sync_status": "Failed"},
+        fields=["item_code", "retry_count", "last_failed_at"],
+    )
+
+    if not failed_maps:
+        return
+
+    now = frappe.utils.now_datetime()
+    due = []
+
+    for m in failed_maps:
+        retry_count = m.get("retry_count") or 0
+
+        if retry_count > MAX_RETRIES:
+            continue  # exhausted — wait for a manual trigger
+
+        last_failed = m.get("last_failed_at")
+        if last_failed:
+            wait = _backoff_minutes(retry_count)
+            next_retry = frappe.utils.add_to_date(last_failed, minutes=wait)
+            if now < next_retry:
+                continue  # still within the backoff window
+
+        due.append(m["item_code"])
+
+    if not due:
+        return
+
+    # Only retry items that still want to be synced
+    valid = set(
+        frappe.get_all(
+            "Item",
+            filters={"item_code": ["in", due], "sync_to_magento": 1},
+            pluck="item_code",
+        )
+    )
+    due = [c for c in due if c in valid]
+
+    if not due:
+        return
+
+    _dispatch_batches(due, job_prefix="magento_retry_batch")
+    frappe.logger("connector").info(
+        f"retry_failed_product_sync: retrying {len(due)} failed items."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal: enqueue batches with deduplication
+# ---------------------------------------------------------------------------
+
+def _dispatch_batches(item_codes, job_prefix):
+    """
+    Split item_codes into BATCH_SIZE chunks and enqueue each as a single
+    background job on the `long` queue.
+
+    job_name is deterministic per prefix+offset so that if full_product_sync
+    fires again before the previous batch finishes, no duplicate job is added.
+    """
+    for start in range(0, len(item_codes), BATCH_SIZE):
+        batch = item_codes[start: start + BATCH_SIZE]
         frappe.enqueue(
             "connector.sync.product_sync._run_batch_product_sync",
             queue="long",
             timeout=600,
+            job_name=f"{job_prefix}_{start}",
+            enqueue_after_commit=True,
             item_codes=batch,
-            job_name=f"magento_product_sync_batch_{start}",
         )
-
-    frappe.logger("connector").info(
-        f"full_product_sync: enqueued {len(to_sync)} items in batches of {BATCH_SIZE_PRODUCT_SYNC}."
-    )
-
-
-def _run_batch_product_sync(item_codes):
-    """Process a batch of items; called by full_product_sync."""
-    for item_code in item_codes:
-        try:
-            push_item_to_magento(item_code)
-        except Exception as e:
-            frappe.log_error(
-                f"Batch product sync failed for {item_code}: {e}",
-                "Connector Product Sync Batch",
-            )

@@ -11,7 +11,9 @@
   "magento_sku",
   "column_break_1",
   "last_synced_on",
-  "sync_status"
+  "sync_status",
+  "retry_count",
+  "last_failed_at"
  ],
  "fields": [
   {
@@ -51,6 +53,19 @@
    "in_list_view": 1,
    "label": "Sync Status",
    "options": "Synced\nFailed\nPending"
+  },
+  {
+   "fieldname": "retry_count",
+   "fieldtype": "Int",
+   "label": "Retry Count",
+   "default": "0",
+   "description": "Number of consecutive failed sync attempts"
+  },
+  {
+   "fieldname": "last_failed_at",
+   "fieldtype": "Datetime",
+   "label": "Last Failed At",
+   "description": "Timestamp of the last failed sync attempt (used for exponential backoff)"
   }
  ],
  "links": [],

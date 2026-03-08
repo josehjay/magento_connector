@@ -66,6 +66,17 @@ def full_product_sync():
         frappe.log_error(frappe.get_traceback(), "Connector Scheduled: full_product_sync failed")
 
 
+def retry_failed_product_sync():
+    """Every 30 minutes: retry products that failed their last sync (exponential backoff)."""
+    if not _is_magento_enabled():
+        return
+    try:
+        from connector.sync.product_sync import retry_failed_product_sync as _sync
+        _sync()
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Connector Scheduled: retry_failed_product_sync failed")
+
+
 def erpnext_product_sync():
     """Every hour: push stale/unsynced ERPNext items to remote ERPNext sites."""
     if not _is_erpnext_site_sync_enabled():
