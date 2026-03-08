@@ -264,34 +264,73 @@ class MagentoClient:
     def get_attribute_sets(self):
         """
         GET attribute sets for catalog_product (product attribute sets).
+        Tries /products/attribute-sets/sets/list first (common in Magento 2), then /eav/attribute-sets/list.
         Returns list of dicts with attribute_set_id, attribute_set_name.
         """
         params = {
-            "searchCriteria[filterGroups][0][filters][0][field]": "entity_type_code",
-            "searchCriteria[filterGroups][0][filters][0][value]": "catalog_product",
             "searchCriteria[pageSize]": 200,
         }
+        items = []
+
+        # Try 1: Magento 2 products attribute sets (common endpoint)
         try:
-            # Try store-scoped path first; some Magento versions use global path
-            result = self.get("/eav/attribute-sets/list", params=params)
+            result = self.get("/products/attribute-sets/sets/list", params=params)
+            items = self._parse_attribute_sets_response(result)
         except MagentoAPIError:
-            base_global = f"{self.base_url}/rest/V1"
-            url = f"{base_global}/eav/attribute-sets/list"
-            resp = self.session.request("GET", url, params=params, timeout=30)
-            if resp.status_code >= 400:
-                raise MagentoAPIError(
-                    f"Magento API error [{resp.status_code}]: {resp.text}",
-                    resp.status_code,
-                    resp.text,
-                )
-            result = resp.json() if resp.text else {}
+            pass
+
+        # Try 2: EAV attribute sets with entity type filter
+        if not items:
+            try:
+                params["searchCriteria[filterGroups][0][filters][0][field]"] = "entity_type_code"
+                params["searchCriteria[filterGroups][0][filters][0][value]"] = "catalog_product"
+                result = self.get("/eav/attribute-sets/list", params=params)
+                items = self._parse_attribute_sets_response(result)
+            except MagentoAPIError:
+                pass
+
+        # Try 3: Global path (no store code) for some Magento setups
+        if not items:
+            try:
+                base_global = f"{self.base_url}/rest/V1"
+                url = f"{base_global}/products/attribute-sets/sets/list"
+                resp = self.session.request("GET", url, params={"searchCriteria[pageSize]": 200}, timeout=30)
+                if resp.status_code == 200 and resp.text:
+                    items = self._parse_attribute_sets_response(resp.json())
+                else:
+                    url = f"{base_global}/eav/attribute-sets/list"
+                    resp = self.session.request("GET", url, params=params, timeout=30)
+                    if resp.status_code == 200 and resp.text:
+                        items = self._parse_attribute_sets_response(resp.json())
+            except Exception:
+                pass
+
+        return items
+
+    def _parse_attribute_sets_response(self, result):
+        """Parse Magento attribute sets list from various response shapes."""
+        if not result:
+            return []
         items = result.get("items", result) if isinstance(result, dict) else result
         if not isinstance(items, list):
             items = [items] if items else []
-        return [
-            {"attribute_set_id": int(x["attribute_set_id"]), "attribute_set_name": x.get("attribute_set_name", "")}
-            for x in items
-        ]
+        out = []
+        for x in items:
+            if not isinstance(x, dict):
+                continue
+            try:
+                aid = x.get("attribute_set_id")
+                if aid is None:
+                    continue
+                name = x.get("attribute_set_name") or x.get("name") or str(aid)
+                if isinstance(name, str):
+                    name = name[:255]
+                else:
+                    name = str(aid)
+                out.append({"attribute_set_id": int(aid), "attribute_set_name": name})
+            except (TypeError, ValueError):
+                continue
+        return out
 
     def _flatten_category_tree(self, node, path_prefix=""):
         """Recursively flatten a category node with children_data into a list."""
