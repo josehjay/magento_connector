@@ -30,8 +30,12 @@ from connector.connector.doctype.magento_sync_log.magento_sync_log import (
 # They are only retried when the item is explicitly saved or manually triggered.
 MAX_RETRIES = 10
 
-# Number of items per batch job sent to the `long` queue.
-BATCH_SIZE = 50
+# Number of items per batch job. Kept small so each job finishes within timeout
+# (each item may do 2+ Magento API calls; slow responses can exceed 600s with 50 items).
+BATCH_SIZE = 20
+
+# Timeout in seconds for each batch job (long queue).
+BATCH_JOB_TIMEOUT = 900
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +491,7 @@ def _dispatch_batches(item_codes, job_prefix):
         frappe.enqueue(
             "connector.sync.product_sync._run_batch_product_sync",
             queue="long",
-            timeout=600,
+            timeout=BATCH_JOB_TIMEOUT,
             job_name=f"{job_prefix}_{start}",
             enqueue_after_commit=True,
             item_codes=batch,
