@@ -20,16 +20,17 @@
   {
    "fieldname": "attribute_set_id",
    "fieldtype": "Select",
-   "in_list_view": 1,
-   "label": "Magento Attribute Set",
+   "in_list_view": 0,
+   "label": "Attribute Set ID",
    "description": "Attribute set in Magento to use for products in this Item Group (options loaded from Magento)"
   },
   {
    "fieldname": "attribute_set_name",
    "fieldtype": "Data",
-   "label": "Attribute Set Name",
+   "in_list_view": 1,
+   "label": "Magento Attribute Set",
    "read_only": 1,
-   "hidden": 1
+   "description": "Display name (set when you select an attribute set)"
   }
  ],
  "istable": 1,

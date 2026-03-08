@@ -24,12 +24,38 @@
         if (currentVal != null && currentVal !== "") $sel.val(String(currentVal));
     }
 
+    function get_attribute_set_name(items, attributeSetId) {
+        if (!items || !attributeSetId) return "";
+        var found = items.find(function (s) { return String(s.attribute_set_id) === String(attributeSetId); });
+        return found ? (found.attribute_set_name || "").toString().trim() : "";
+    }
+
+    function sync_row_attribute_set_names(frm) {
+        var items = frm._magento_attribute_sets;
+        if (!items || !frm.doc.magento_item_groups) return;
+        var changed = false;
+        frm.doc.magento_item_groups.forEach(function (row) {
+            if (row.attribute_set_id && !row.attribute_set_name) {
+                row.attribute_set_name = get_attribute_set_name(items, row.attribute_set_id);
+                changed = true;
+            } else if (row.attribute_set_id && row.attribute_set_name) {
+                var name = get_attribute_set_name(items, row.attribute_set_id);
+                if (name && row.attribute_set_name !== name) {
+                    row.attribute_set_name = name;
+                    changed = true;
+                }
+            }
+        });
+        if (changed) frm.refresh_field("magento_item_groups");
+    }
+
     function apply_attribute_set_options_to_grid(frm, items) {
         if (!items || items.length === 0) return;
         var grid = frm.fields_dict.magento_item_groups && frm.fields_dict.magento_item_groups.grid;
         if (!grid) return;
 
         grid.update_docfield("attribute_set_id", "options", build_attribute_set_options(items));
+        sync_row_attribute_set_names(frm);
 
         var $wrapper = grid.wrapper || grid.$wrapper;
         if ($wrapper && $wrapper.length) {
@@ -82,6 +108,7 @@
                     items = r.message.items;
                     frm._magento_attribute_sets = items;
                     apply_attribute_set_options_to_grid(frm, items);
+                    sync_row_attribute_set_names(frm);
                 } else if (r.message && !r.message.ok) {
                     // Error already logged on server
                 }
@@ -162,6 +189,11 @@
     }
 
     frappe.ui.form.on("Magento Settings", {
+        magento_item_groups_attribute_set_id: function (frm, cdt, cdn) {
+            var row = frappe.get_doc(cdt, cdn);
+            var name = get_attribute_set_name(frm._magento_attribute_sets, row.attribute_set_id);
+            if (name) frappe.model.set_value(cdt, cdn, "attribute_set_name", name);
+        },
         magento_item_groups_on_form_rendered: function (frm, cdt, cdn) {
             function try_apply() {
                 var items = frm._magento_attribute_sets;
@@ -251,6 +283,15 @@
                     },
                 });
             }, __("Actions"));
+        },
+    });
+
+    frappe.ui.form.on("Magento Item Group", {
+        attribute_set_id: function (frm, cdt, cdn) {
+            if (!frm._magento_attribute_sets) return;
+            var row = frappe.get_doc(cdt, cdn);
+            var name = get_attribute_set_name(frm._magento_attribute_sets, row.attribute_set_id);
+            if (name) frappe.model.set_value(cdt, cdn, "attribute_set_name", name);
         },
     });
 })();
