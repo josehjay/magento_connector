@@ -466,11 +466,18 @@ def retry_failed_product_sync():
     if not due:
         return
 
-    # Process retries synchronously to avoid adding jobs when the queue is full.
-    # Failed-item count is typically small; scheduler already runs in a worker.
-    _run_batch_product_sync(due)
+    # Run retries in a single long-queue job so the scheduler task returns within
+    # its 300s limit; the actual work uses BATCH_JOB_TIMEOUT (e.g. 900s).
+    frappe.enqueue(
+        "connector.sync.product_sync._run_batch_product_sync",
+        queue="long",
+        timeout=BATCH_JOB_TIMEOUT,
+        job_name="magento_retry_failed_sync",
+        enqueue_after_commit=True,
+        item_codes=due,
+    )
     frappe.logger("connector").info(
-        f"retry_failed_product_sync: processed {len(due)} failed items."
+        f"retry_failed_product_sync: enqueued {len(due)} failed items for retry."
     )
 
 
