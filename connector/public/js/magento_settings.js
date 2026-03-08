@@ -3,36 +3,70 @@
 (function () {
     "use strict";
 
+    function build_attribute_set_options(items) {
+        if (!items || !items.length) return "";
+        return "\n" + items.map(function (s) {
+            var name = (s.attribute_set_name || s.attribute_set_id || "").toString().trim();
+            return s.attribute_set_id + "|" + name;
+        }).join("\n");
+    }
+
+    function inject_options_into_select($select, items, currentVal) {
+        if (!$select || !$select.length || !items || !items.length) return;
+        var $sel = $select.eq(0);
+        $sel.empty();
+        $sel.append($("<option value=\"\">" + (__("Select…") || "Select…") + "</option>"));
+        items.forEach(function (s) {
+            var val = s.attribute_set_id;
+            var label = (s.attribute_set_name || s.attribute_set_id || "").toString().trim();
+            $sel.append($("<option value=\"" + val + "\">" + frappe.utils.escape_html(label) + "</option>"));
+        });
+        if (currentVal != null && currentVal !== "") $sel.val(String(currentVal));
+    }
+
     function apply_attribute_set_options_to_grid(frm, items) {
         if (!items || items.length === 0) return;
         var grid = frm.fields_dict.magento_item_groups && frm.fields_dict.magento_item_groups.grid;
         if (!grid) return;
 
-        var options_str = "\n" + items.map(function (s) {
-            var name = (s.attribute_set_name || s.attribute_set_id || "").toString().trim();
-            return s.attribute_set_id + "|" + name;
-        }).join("\n");
-        grid.update_docfield("attribute_set_id", "options", options_str);
+        grid.update_docfield("attribute_set_id", "options", build_attribute_set_options(items));
 
         var $wrapper = grid.wrapper || grid.$wrapper;
         if ($wrapper && $wrapper.length) {
             $wrapper.find('select[data-fieldname="attribute_set_id"]').each(function () {
                 var $sel = $(this);
-                $sel.empty();
-                $sel.append($("<option value=\"\">" + (__("Select…") || "Select…") + "</option>"));
-                items.forEach(function (s) {
-                    var val = s.attribute_set_id;
-                    var label = (s.attribute_set_name || s.attribute_set_id || "").toString().trim();
-                    $sel.append($("<option value=\"" + val + "\">" + frappe.utils.escape_html(label) + "</option>"));
-                });
                 var $row = $sel.closest(".grid-row");
                 var rowIdx = $row.length ? $row.attr("data-idx") : null;
-                if (rowIdx !== undefined && rowIdx !== null && frm.doc.magento_item_groups && frm.doc.magento_item_groups[rowIdx]) {
-                    var current = frm.doc.magento_item_groups[rowIdx].attribute_set_id;
-                    if (current != null && current !== "") $sel.val(String(current));
-                }
+                var current = (rowIdx != null && frm.doc.magento_item_groups && frm.doc.magento_item_groups[rowIdx])
+                    ? frm.doc.magento_item_groups[rowIdx].attribute_set_id : null;
+                inject_options_into_select($sel, items, current);
             });
         }
+    }
+
+    function apply_options_to_row_dialog(frm, items) {
+        if (!items || !items.length) return;
+        var grid = frm.fields_dict.magento_item_groups && frm.fields_dict.magento_item_groups.grid;
+        var rowForm = grid && grid.grid_form;
+        if (rowForm && rowForm.fields_dict && rowForm.fields_dict.attribute_set_id) {
+            rowForm.set_df_property("attribute_set_id", "options", build_attribute_set_options(items));
+            if (rowForm.refresh_field) rowForm.refresh_field("attribute_set_id");
+            return;
+        }
+        var $container = $(".modal:visible, .slide-over:visible, .form-onboarding:visible");
+        if (!$container.length) $container = $(document.body);
+        var $selects = $container.find('select[data-fieldname="attribute_set_id"]');
+        if (!$selects.length) $selects = $container.find("[data-fieldname=\"attribute_set_id\"] select");
+        if (!$selects.length) $container.find(".frappe-control").each(function () {
+            var $ctrl = $(this);
+            if ($ctrl.find("label").text().indexOf("Magento Attribute Set") !== -1 || $ctrl.attr("data-fieldname") === "attribute_set_id") {
+                var $s = $ctrl.find("select");
+                if ($s.length) $selects = $selects.add($s);
+            }
+        });
+        $selects.each(function () {
+            inject_options_into_select($(this), items, $(this).val());
+        });
     }
 
     function fetch_and_apply_attribute_sets(frm, callback) {
@@ -128,7 +162,51 @@
     }
 
     frappe.ui.form.on("Magento Settings", {
+        magento_item_groups_on_form_rendered: function (frm, cdt, cdn) {
+            function try_apply() {
+                var items = frm._magento_attribute_sets;
+                if (items && items.length) {
+                    apply_options_to_row_dialog(frm, items);
+                    return;
+                }
+                frappe.call({
+                    method: "connector.api.magento_options.get_magento_attribute_sets",
+                    callback: function (r) {
+                        if (r.message && r.message.ok && r.message.items && r.message.items.length) {
+                            frm._magento_attribute_sets = r.message.items;
+                            apply_options_to_row_dialog(frm, r.message.items);
+                        }
+                    },
+                });
+            }
+            setTimeout(try_apply, 0);
+            setTimeout(try_apply, 150);
+            setTimeout(try_apply, 400);
+        },
         refresh: function (frm) {
+            var cur_frm = frm;
+            $(document).on("shown.bs.modal", ".modal", function onMagentoSettingsModalShown() {
+                var $modal = $(this);
+                if (!$modal.find("[data-fieldname=\"attribute_set_id\"]").length && !$modal.find("select[data-fieldname=\"attribute_set_id\"]").length) return;
+                if (!cur_frm || !cur_frm.fields_dict.magento_item_groups) return;
+                function do_apply() {
+                    if (cur_frm._magento_attribute_sets && cur_frm._magento_attribute_sets.length) {
+                        apply_options_to_row_dialog(cur_frm, cur_frm._magento_attribute_sets);
+                        return;
+                    }
+                    frappe.call({
+                        method: "connector.api.magento_options.get_magento_attribute_sets",
+                        callback: function (r) {
+                            if (r.message && r.message.ok && r.message.items && r.message.items.length) {
+                                cur_frm._magento_attribute_sets = r.message.items;
+                                apply_options_to_row_dialog(cur_frm, r.message.items);
+                            }
+                        },
+                    });
+                }
+                setTimeout(do_apply, 50);
+                setTimeout(do_apply, 300);
+            });
             if (frm.fields_dict.magento_item_groups) {
                 setTimeout(function () { fetch_and_apply_attribute_sets(frm); }, 400);
                 setTimeout(function () {
