@@ -19,11 +19,28 @@ def _is_magento_enabled():
         return True
 
 
+def _should_send_stock_for_item(item_code, send_stock_global):
+    """
+    True if stock should be sent to Magento for this item.
+    Per-item magento_send_stock overrides: Yes = send, No = don't send, blank = use global.
+    """
+    try:
+        per_item = frappe.db.get_value("Item", item_code, "magento_send_stock")
+    except Exception:
+        return bool(send_stock_global)
+    if per_item == "No":
+        return False
+    if per_item == "Yes":
+        return True
+    return bool(send_stock_global)
+
+
 def sync_inventory():
     """
     Main entry point called by the scheduler.
     Reads all Bin records, groups by item_code, and pushes totals to Magento.
     Only items that have been synced to Magento (have a product map entry) are updated.
+    Respects Magento Settings "Send available stock to Magento" and per-Item override.
     """
     if not _is_magento_enabled():
         return
@@ -31,6 +48,10 @@ def sync_inventory():
     sync_enabled = frappe.db.get_single_value("Magento Settings", "sync_enabled")
     if not sync_enabled:
         return
+
+    send_stock_global = frappe.db.get_single_value("Magento Settings", "send_stock_to_magento")
+    if send_stock_global is None:
+        send_stock_global = True
 
     mapped_items = frappe.get_all(
         "Magento Product Map",
@@ -42,6 +63,7 @@ def sync_inventory():
         return
 
     mapped_dict = {row["item_code"]: row["magento_sku"] for row in mapped_items}
+    item_codes = list(mapped_dict.keys())
 
     bin_data = frappe.db.sql(
         """
@@ -50,7 +72,7 @@ def sync_inventory():
         WHERE item_code IN %(item_codes)s
         GROUP BY item_code
         """,
-        {"item_codes": list(mapped_dict.keys())},
+        {"item_codes": item_codes},
         as_dict=True,
     )
 
@@ -70,6 +92,8 @@ def sync_inventory():
     fail_count = 0
 
     for item_code, qty in bin_map.items():
+        if not _should_send_stock_for_item(item_code, send_stock_global):
+            continue
         sku = mapped_dict.get(item_code, item_code)
         try:
             client.update_stock(sku, qty)

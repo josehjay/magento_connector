@@ -1,12 +1,23 @@
 [
   {
     "doctype": "Custom Field",
+    "name": "Item-magento_tab",
+    "dt": "Item",
+    "fieldname": "magento_tab",
+    "fieldtype": "Section Break",
+    "label": "Magento",
+    "insert_after": "website_specifications",
+    "collapsible": 1,
+    "description": "Magento sync and ERPNext site sync settings"
+  },
+  {
+    "doctype": "Custom Field",
     "name": "Item-magento_section_break",
     "dt": "Item",
     "fieldname": "magento_section_break",
     "fieldtype": "Section Break",
     "label": "Magento Integration",
-    "insert_after": "website_specifications",
+    "insert_after": "magento_tab",
     "collapsible": 1,
     "collapsible_depends_on": "eval:doc.magento_product_id"
   },
@@ -23,12 +34,23 @@
   },
   {
     "doctype": "Custom Field",
+    "name": "Item-magento_send_stock",
+    "dt": "Item",
+    "fieldname": "magento_send_stock",
+    "fieldtype": "Select",
+    "label": "Send stock to Magento",
+    "insert_after": "sync_to_magento",
+    "options": "\nYes\nNo",
+    "description": "Override Magento Settings. Yes = always send stock. No = never send. Blank = use Magento Settings default."
+  },
+  {
+    "doctype": "Custom Field",
     "name": "Item-magento_product_id",
     "dt": "Item",
     "fieldname": "magento_product_id",
     "fieldtype": "Int",
     "label": "Magento Product ID",
-    "insert_after": "sync_to_magento",
+    "insert_after": "magento_send_stock",
     "read_only": 1,
     "in_list_view": 1,
     "in_standard_filter": 1
@@ -74,59 +96,6 @@
     "insert_after": "erpnext_sync_section_break",
     "default": "0",
     "description": "When checked, this item will be pushed to all enabled remote ERPNext sites"
-  },
-  {
-    "doctype": "Custom Field",
-    "name": "Item-magento_config_section",
-    "dt": "Item",
-    "fieldname": "magento_config_section",
-    "fieldtype": "Section Break",
-    "label": "Magento Config",
-    "insert_after": "sync_to_erpnext_sites",
-    "collapsible": 1,
-    "description": "Attribute set, categories and custom attributes from Magento (options loaded when form opens)"
-  },
-  {
-    "doctype": "Custom Field",
-    "name": "Item-magento_attribute_set_id",
-    "dt": "Item",
-    "fieldname": "magento_attribute_set_id",
-    "fieldtype": "Select",
-    "label": "Attribute Set",
-    "insert_after": "magento_config_section",
-    "description": "Magento attribute set (options loaded from Magento when form opens)"
-  },
-  {
-    "doctype": "Custom Field",
-    "name": "Item-magento_attribute_set_name",
-    "dt": "Item",
-    "fieldname": "magento_attribute_set_name",
-    "fieldtype": "Data",
-    "label": "Attribute Set Name",
-    "insert_after": "magento_attribute_set_id",
-    "read_only": 1
-  },
-  {
-    "doctype": "Custom Field",
-    "name": "Item-magento_categories",
-    "dt": "Item",
-    "fieldname": "magento_categories",
-    "fieldtype": "Table",
-    "label": "Magento Categories",
-    "insert_after": "magento_attribute_set_name",
-    "options": "Item Magento Category",
-    "description": "Categories to assign this product to in Magento"
-  },
-  {
-    "doctype": "Custom Field",
-    "name": "Item-magento_custom_attributes",
-    "dt": "Item",
-    "fieldname": "magento_custom_attributes",
-    "fieldtype": "Table",
-    "label": "Magento Custom Attributes",
-    "insert_after": "magento_categories",
-    "options": "Item Magento Attribute",
-    "description": "Custom attribute code and value for Magento product"
   },
   {
     "doctype": "Custom Field",

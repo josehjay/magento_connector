@@ -178,6 +178,10 @@ class MagentoClient:
                 return False
             raise
 
+    def delete_product(self, sku):
+        """DELETE /V1/products/{sku} — remove product from Magento (if API supports it)."""
+        self._request("DELETE", f"/products/{requests.utils.quote(sku, safe='')}")
+
     # ------------------------------------------------------------------
     # Product media
     # ------------------------------------------------------------------

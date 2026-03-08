@@ -22,6 +22,7 @@
   "magento_item_groups",
   "sync_section",
   "sync_enabled",
+  "send_stock_to_magento",
   "last_order_sync_time",
   "column_break_3",
   "token_expiry",
@@ -132,6 +133,13 @@
    "fieldtype": "Check",
    "label": "Enable Sync",
    "description": "Master switch — uncheck to pause all sync operations"
+  },
+  {
+   "default": "1",
+   "fieldname": "send_stock_to_magento",
+   "fieldtype": "Check",
+   "label": "Send available stock to Magento",
+   "description": "When checked, inventory sync will push stock quantities to Magento. Uncheck to disable stock sync globally (can override per product on the Item form)."
   },
   {
    "fieldname": "last_order_sync_time",

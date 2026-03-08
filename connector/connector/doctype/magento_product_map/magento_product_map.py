@@ -33,3 +33,10 @@ def upsert_map(item_code, magento_product_id, magento_sku=None, status="Synced")
         doc.sync_status = status
         doc.insert(ignore_permissions=True)
     frappe.db.commit()
+
+
+def delete_map(item_code):
+    """Remove the product map entry for the given item (when Sync to Magento is unchecked)."""
+    if frappe.db.exists("Magento Product Map", item_code):
+        frappe.delete_doc("Magento Product Map", item_code, ignore_permissions=True)
+        frappe.db.commit()

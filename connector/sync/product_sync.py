@@ -11,6 +11,7 @@ from connector.api.magento_client import MagentoClient, MagentoAPIError
 from connector.connector.doctype.magento_product_map.magento_product_map import (
     get_magento_product_id,
     upsert_map,
+    delete_map,
 )
 from connector.connector.doctype.magento_sync_log.magento_sync_log import (
     create_log,
@@ -60,65 +61,60 @@ def _get_item_price(item_code, price_list):
     return float(price) if price else 0.0
 
 
+def _get_attribute_set_for_item_group(item_group):
+    """
+    Return Magento attribute_set_id for the given Item Group from Magento Settings.
+    If the Item Group is in magento_item_groups with an attribute_set_id, use it; else 4.
+    """
+    settings = frappe.get_single("Magento Settings")
+    for row in settings.magento_item_groups or []:
+        if row.item_group == item_group and row.get("attribute_set_id"):
+            try:
+                return int(row.attribute_set_id)
+            except (TypeError, ValueError):
+                pass
+    return 4
+
+
 def _build_product_payload(doc):
     """
     Convert an ERPNext Item doc into a Magento product payload dict.
-    Uses Magento Config tab: attribute_set_id, magento_categories, magento_custom_attributes.
+    Attribute set comes from Magento Settings → Item Group mapping.
     Does NOT set stock — inventory is managed by inventory_sync.py.
+    When Item is disabled, status is set to 2 (Disabled) in Magento.
     """
     settings = frappe.get_single("Magento Settings")
     price_list = settings.price_list
     price = _get_item_price(doc.item_code, price_list)
 
     description = doc.description or doc.item_name or ""
+    attribute_set_id = _get_attribute_set_for_item_group(doc.item_group or "")
 
-    attribute_set_id = 4
-    if doc.get("magento_attribute_set_id"):
-        try:
-            attribute_set_id = int(doc.magento_attribute_set_id)
-        except (TypeError, ValueError):
-            pass
-
-    custom_attributes = [
-        {"attribute_code": "description", "value": description},
-        {"attribute_code": "short_description", "value": description[:255]},
-    ]
-    if doc.get("magento_custom_attributes"):
-        for row in doc.magento_custom_attributes:
-            if row.get("attribute_code") and row.get("attribute_code") not in ("description", "short_description"):
-                custom_attributes.append({
-                    "attribute_code": row.attribute_code,
-                    "value": str(row.get("attribute_value") or ""),
-                })
-            elif row.get("attribute_code") in ("description", "short_description"):
-                custom_attributes = [c for c in custom_attributes if c["attribute_code"] != row["attribute_code"]]
-                custom_attributes.append({
-                    "attribute_code": row.attribute_code,
-                    "value": str(row.get("attribute_value") or ""),
-                })
-
-    extension_attributes = {
-        "stock_item": {
-            "manage_stock": True,
-            "qty": 0,
-            "is_in_stock": False,
-        }
-    }
-    if doc.get("magento_categories"):
-        extension_attributes["category_links"] = [
-            {"category_id": str(row.category_id)} for row in doc.magento_categories if row.get("category_id")
-        ]
+    # Disabled items sync as status=2 (Disabled) in Magento
+    if doc.get("disabled"):
+        status = 2
+    else:
+        status = 1 if doc.is_sales_item else 2
 
     payload = {
         "sku": doc.item_code,
         "name": doc.item_name,
         "price": price,
-        "status": 1 if doc.is_sales_item else 2,
+        "status": status,
         "visibility": 4,
         "type_id": "simple",
         "attribute_set_id": attribute_set_id,
-        "custom_attributes": custom_attributes,
-        "extension_attributes": extension_attributes,
+        "custom_attributes": [
+            {"attribute_code": "description", "value": description},
+            {"attribute_code": "short_description", "value": description[:255]},
+        ],
+        "extension_attributes": {
+            "stock_item": {
+                "manage_stock": True,
+                "qty": 0,
+                "is_in_stock": False,
+            }
+        },
     }
 
     if doc.get("weight_per_unit") and doc.weight_per_unit:
@@ -130,13 +126,21 @@ def _build_product_payload(doc):
 def on_item_save(doc, method):
     """
     Hook called on Item after_insert and on_update.
-    Pushes the item to Magento if sync is enabled, sync_to_magento is set,
-    and the item's group is in the allowed list (if configured).
+    - If sync_to_magento is set: push to Magento (when enabled and group allowed).
+    - If sync_to_magento is unchecked and item was synced: remove from Magento, map, and clear Item fields.
     Non-blocking — errors are logged but never raised to the user.
     """
     if not _is_sync_enabled():
         return
+
     if not doc.get("sync_to_magento"):
+        if get_magento_product_id(doc.item_code):
+            frappe.enqueue(
+                "connector.sync.product_sync.remove_from_magento",
+                queue="default",
+                timeout=60,
+                item_code=doc.item_code,
+            )
         return
     if not _is_item_group_allowed(doc.item_group):
         return
@@ -146,6 +150,45 @@ def on_item_save(doc, method):
         queue="default",
         timeout=120,
         item_code=doc.item_code,
+    )
+
+
+def remove_from_magento(item_code):
+    """
+    When user deselects Sync to Magento: disable product in Magento, delete map entry,
+    clear magento_product_id and related fields on Item.
+    """
+    magento_id = get_magento_product_id(item_code)
+    if not magento_id:
+        return
+    try:
+        client = MagentoClient()
+        try:
+            client.delete_product(item_code)
+        except MagentoAPIError as e:
+            if e.status_code == 404:
+                pass
+            else:
+                client.update_product(item_code, {"status": 2})
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "Connector: Remove from Magento")
+    delete_map(item_code)
+    frappe.db.set_value(
+        "Item",
+        item_code,
+        {
+            "magento_product_id": None,
+            "magento_last_synced_on": None,
+            "magento_sync_error": "",
+        },
+    )
+    frappe.db.commit()
+    create_log(
+        operation="Remove from Magento",
+        status="Success",
+        doctype_name="Item",
+        document_name=item_code,
+        magento_id=magento_id,
     )
 
 
@@ -240,7 +283,7 @@ def full_product_sync():
     if not _is_sync_enabled():
         return
 
-    filters = {"sync_to_magento": 1, "disabled": 0}
+    filters = {"sync_to_magento": 1}
 
     allowed_groups = _get_allowed_item_groups()
     if allowed_groups:

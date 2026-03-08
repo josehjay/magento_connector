@@ -4,7 +4,9 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
-  "item_group"
+  "item_group",
+  "attribute_set_id",
+  "attribute_set_name"
  ],
  "fields": [
   {
@@ -14,6 +16,20 @@
    "label": "Item Group",
    "options": "Item Group",
    "reqd": 1
+  },
+  {
+   "fieldname": "attribute_set_id",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Magento Attribute Set",
+   "description": "Attribute set in Magento to use for products in this Item Group (options loaded from Magento)"
+  },
+  {
+   "fieldname": "attribute_set_name",
+   "fieldtype": "Data",
+   "label": "Attribute Set Name",
+   "read_only": 1,
+   "hidden": 1
   }
  ],
  "istable": 1,

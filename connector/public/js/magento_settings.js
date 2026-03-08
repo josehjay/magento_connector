@@ -1,8 +1,27 @@
 // Client script for Magento Settings (Single DocType)
-// Adds action buttons for testing connection and triggering manual syncs.
+// Adds action buttons and loads Magento attribute sets for Item Group → Attribute Set.
 
 frappe.ui.form.on("Magento Settings", {
     refresh(frm) {
+        // Load attribute set options for Item Groups table (options set on grid column)
+        if (frm.fields_dict.magento_item_groups) {
+            frappe.call({
+                method: "connector.api.magento_options.get_magento_attribute_sets",
+                callback(r) {
+                    if (r.message && r.message.ok && r.message.items && r.message.items.length) {
+                        const opts = r.message.items.map(
+                            (s) => `${s.attribute_set_id}|${s.attribute_set_name || s.attribute_set_id}`
+                        );
+                        frm.fields_dict.magento_item_groups.grid.update_docfield(
+                            "attribute_set_id",
+                            "options",
+                            "\n" + opts.join("\n")
+                        );
+                    }
+                },
+            });
+        }
+
         frm.add_custom_button(__("Test Connection"), () => {
             frappe.call({
                 doc: frm.doc,
