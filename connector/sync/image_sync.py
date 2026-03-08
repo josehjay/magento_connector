@@ -1,9 +1,10 @@
 """
-Image Sync: Magento Base Product Image URL → ERPNext Item.item_image
+Image Sync: Magento Base Product Image URL → ERPNext Item image field
 
 Scheduled every 30 minutes via tasks.py.
 Fetches the base image for each synced product and saves its URL
-into the ERPNext Item's item_image field (no file download — URL only).
+into the ERPNext Item's image field (no file download — URL only).
+Uses 'image' or 'item_image' depending on what exists on Item.
 """
 
 import frappe
@@ -11,6 +12,15 @@ from connector.api.magento_client import MagentoClient, MagentoAPIError
 from connector.connector.doctype.magento_sync_log.magento_sync_log import (
     create_log,
 )
+
+# Item image field: ERPNext standard is "image"; some setups use "item_image"
+def _get_item_image_field():
+    meta = frappe.get_meta("Item")
+    if meta.has_field("item_image"):
+        return "item_image"
+    if meta.has_field("image"):
+        return "image"
+    return None
 
 
 def _is_magento_enabled():
@@ -24,7 +34,7 @@ def sync_images():
     """
     Scheduled entry point.
     For all items with a Magento product map, fetch the base image URL and
-    store it in ERPNext Item.item_image.
+    store it in ERPNext Item image field (image or item_image).
     """
     if not _is_magento_enabled():
         return
@@ -33,7 +43,17 @@ def sync_images():
     if not sync_enabled:
         return
 
-    magento_url = frappe.db.get_single_value("Magento Settings", "magento_url").rstrip("/")
+    image_field = _get_item_image_field()
+    if not image_field:
+        frappe.logger("connector").warning(
+            "sync_images: Item has no 'image' or 'item_image' field; skipping."
+        )
+        return
+
+    magento_url = frappe.db.get_single_value("Magento Settings", "magento_url")
+    if not magento_url:
+        return
+    magento_url = magento_url.rstrip("/")
 
     mapped = frappe.get_all(
         "Magento Product Map",
@@ -77,12 +97,12 @@ def sync_images():
             skipped += 1
             continue
 
-        current_image = frappe.db.get_value("Item", item_code, "item_image")
+        current_image = frappe.db.get_value("Item", item_code, image_field)
         if current_image == base_image_url:
             skipped += 1
             continue
 
-        frappe.db.set_value("Item", item_code, "item_image", base_image_url)
+        frappe.db.set_value("Item", item_code, image_field, base_image_url)
         updated += 1
 
     if updated:

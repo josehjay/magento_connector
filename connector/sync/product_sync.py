@@ -275,10 +275,13 @@ def push_item_to_magento(item_code):
         )
 
 
+BATCH_SIZE_PRODUCT_SYNC = 40
+
+
 def full_product_sync():
     """
     Hourly catch-up: sync all Items that are stale or have never been synced.
-    Enqueues each item individually to avoid a single long-running job.
+    Processes items in batches to avoid queue overload (QueueOverloaded).
     """
     if not _is_sync_enabled():
         return
@@ -295,20 +298,39 @@ def full_product_sync():
         fields=["item_code", "modified", "magento_last_synced_on"],
     )
 
-    queued = 0
-    for item in items:
-        last_synced = item.get("magento_last_synced_on")
-        modified = item.get("modified")
-        if not last_synced or (modified and last_synced < modified):
-            frappe.enqueue(
-                "connector.sync.product_sync.push_item_to_magento",
-                queue="long",
-                timeout=120,
-                item_code=item["item_code"],
-                job_name=f"magento_product_sync_{item['item_code']}",
-            )
-            queued += 1
+    to_sync = [
+        item["item_code"]
+        for item in items
+        if not item.get("magento_last_synced_on")
+        or (item.get("modified") and item["magento_last_synced_on"] < item["modified"])
+    ]
+
+    if not to_sync:
+        frappe.logger("connector").info("full_product_sync: no stale items to sync.")
+        return
+
+    for start in range(0, len(to_sync), BATCH_SIZE_PRODUCT_SYNC):
+        batch = to_sync[start : start + BATCH_SIZE_PRODUCT_SYNC]
+        frappe.enqueue(
+            "connector.sync.product_sync._run_batch_product_sync",
+            queue="long",
+            timeout=600,
+            item_codes=batch,
+            job_name=f"magento_product_sync_batch_{start}",
+        )
 
     frappe.logger("connector").info(
-        f"full_product_sync: queued {queued} items out of {len(items)} total."
+        f"full_product_sync: enqueued {len(to_sync)} items in batches of {BATCH_SIZE_PRODUCT_SYNC}."
     )
+
+
+def _run_batch_product_sync(item_codes):
+    """Process a batch of items; called by full_product_sync."""
+    for item_code in item_codes:
+        try:
+            push_item_to_magento(item_code)
+        except Exception as e:
+            frappe.log_error(
+                f"Batch product sync failed for {item_code}: {e}",
+                "Connector Product Sync Batch",
+            )
