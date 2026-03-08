@@ -143,9 +143,13 @@ def on_item_save(doc, method):
     """
     Hook: Item after_insert / on_update.
     - Deselected sync_to_magento → remove from Magento and map.
-    - Enabled sync_to_magento + allowed group → enqueue push (deduplicated).
+    - Enabled sync_to_magento + allowed group → enqueue push to Magento (deduplicated).
 
-    Uses enqueue_after_commit=True so the job always sees committed data,
+    Any change (name, description, price, status, weight, etc.) triggers a push
+    once the user saves; the background job loads the committed doc and sends the
+    full payload to Magento. User can also click "Push to Magento" after saving.
+
+    Uses enqueue_after_commit=True so the job sees committed data,
     and job_name to prevent duplicate queue entries for the same item.
     """
     if not _is_sync_enabled():
@@ -458,9 +462,11 @@ def retry_failed_product_sync():
     if not due:
         return
 
-    _dispatch_batches(due, job_prefix="magento_retry_batch")
+    # Process retries synchronously to avoid adding jobs when the queue is full.
+    # Failed-item count is typically small; scheduler already runs in a worker.
+    _run_batch_product_sync(due)
     frappe.logger("connector").info(
-        f"retry_failed_product_sync: retrying {len(due)} failed items."
+        f"retry_failed_product_sync: processed {len(due)} failed items."
     )
 
 
