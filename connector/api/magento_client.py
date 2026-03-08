@@ -252,3 +252,111 @@ class MagentoClient:
     def get_customer(self, customer_id):
         """GET /V1/customers/{id}"""
         return self.get(f"/customers/{customer_id}")
+
+    # ------------------------------------------------------------------
+    # Attribute sets, categories, product attributes (for Item form options)
+    # ------------------------------------------------------------------
+
+    def get_attribute_sets(self):
+        """
+        GET attribute sets for catalog_product (product attribute sets).
+        Returns list of dicts with attribute_set_id, attribute_set_name.
+        """
+        params = {
+            "searchCriteria[filterGroups][0][filters][0][field]": "entity_type_code",
+            "searchCriteria[filterGroups][0][filters][0][value]": "catalog_product",
+            "searchCriteria[pageSize]": 200,
+        }
+        try:
+            # Try store-scoped path first; some Magento versions use global path
+            result = self.get("/eav/attribute-sets/list", params=params)
+        except MagentoAPIError:
+            base_global = f"{self.base_url}/rest/V1"
+            url = f"{base_global}/eav/attribute-sets/list"
+            resp = self.session.request("GET", url, params=params, timeout=30)
+            if resp.status_code >= 400:
+                raise MagentoAPIError(
+                    f"Magento API error [{resp.status_code}]: {resp.text}",
+                    resp.status_code,
+                    resp.text,
+                )
+            result = resp.json() if resp.text else {}
+        items = result.get("items", result) if isinstance(result, dict) else result
+        if not isinstance(items, list):
+            items = [items] if items else []
+        return [
+            {"attribute_set_id": int(x["attribute_set_id"]), "attribute_set_name": x.get("attribute_set_name", "")}
+            for x in items
+        ]
+
+    def _flatten_category_tree(self, node, path_prefix=""):
+        """Recursively flatten a category node with children_data into a list."""
+        out = []
+        if not isinstance(node, dict):
+            return out
+        name = node.get("name", str(node.get("id", "")))
+        path = path_prefix + name
+        out.append({
+            "id": int(node.get("id", 0)),
+            "name": name,
+            "path": path,
+            "level": int(node.get("level", 0)),
+        })
+        for child in node.get("children_data", []) or []:
+            out.extend(self._flatten_category_tree(child, path + " > "))
+        return out
+
+    def get_categories(self):
+        """
+        GET category tree and return flat list of {id, name, path} for dropdowns.
+        Uses /V1/categories/list or flattens tree from /V1/categories.
+        """
+        try:
+            params = {"searchCriteria[pageSize]": 500}
+            result = self.get("/categories/list", params=params)
+        except MagentoAPIError:
+            result = None
+        if result is not None:
+            items = result.get("items", result) if isinstance(result, dict) else result
+            if not isinstance(items, list):
+                items = [items] if items else []
+            out = []
+            for x in items:
+                if isinstance(x, dict):
+                    out.append({
+                        "id": int(x.get("id", 0)),
+                        "name": x.get("name", str(x.get("id", ""))),
+                        "path": x.get("path", ""),
+                        "level": int(x.get("level", 0)),
+                    })
+            if out:
+                return out
+        try:
+            result = self.get("/categories")
+            if isinstance(result, dict) and result.get("id") is not None:
+                return self._flatten_category_tree(result)
+            return self._flatten_category_tree(result) if result else []
+        except MagentoAPIError:
+            return []
+
+    def get_product_attributes(self):
+        """
+        GET product attribute codes (for custom attributes dropdown).
+        Returns list of dicts with attribute_code, frontend_label.
+        """
+        params = {"searchCriteria[pageSize]": 500}
+        try:
+            result = self.get("/products/attributes", params=params)
+        except MagentoAPIError:
+            return []
+        items = result.get("items", result) if isinstance(result, dict) else result
+        if not isinstance(items, list):
+            items = [items] if items else []
+        return [
+            {
+                "attribute_code": x.get("attribute_code", ""),
+                "frontend_label": x.get("default_frontend_label", "") or x.get("attribute_code", ""),
+            }
+            for x in items
+            if x.get("attribute_code")
+        ]

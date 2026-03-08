@@ -77,6 +77,59 @@
   },
   {
     "doctype": "Custom Field",
+    "name": "Item-magento_config_section",
+    "dt": "Item",
+    "fieldname": "magento_config_section",
+    "fieldtype": "Section Break",
+    "label": "Magento Config",
+    "insert_after": "sync_to_erpnext_sites",
+    "collapsible": 1,
+    "description": "Attribute set, categories and custom attributes from Magento (options loaded when form opens)"
+  },
+  {
+    "doctype": "Custom Field",
+    "name": "Item-magento_attribute_set_id",
+    "dt": "Item",
+    "fieldname": "magento_attribute_set_id",
+    "fieldtype": "Select",
+    "label": "Attribute Set",
+    "insert_after": "magento_config_section",
+    "description": "Magento attribute set (options loaded from Magento when form opens)"
+  },
+  {
+    "doctype": "Custom Field",
+    "name": "Item-magento_attribute_set_name",
+    "dt": "Item",
+    "fieldname": "magento_attribute_set_name",
+    "fieldtype": "Data",
+    "label": "Attribute Set Name",
+    "insert_after": "magento_attribute_set_id",
+    "read_only": 1
+  },
+  {
+    "doctype": "Custom Field",
+    "name": "Item-magento_categories",
+    "dt": "Item",
+    "fieldname": "magento_categories",
+    "fieldtype": "Table",
+    "label": "Magento Categories",
+    "insert_after": "magento_attribute_set_name",
+    "options": "Item Magento Category",
+    "description": "Categories to assign this product to in Magento"
+  },
+  {
+    "doctype": "Custom Field",
+    "name": "Item-magento_custom_attributes",
+    "dt": "Item",
+    "fieldname": "magento_custom_attributes",
+    "fieldtype": "Table",
+    "label": "Magento Custom Attributes",
+    "insert_after": "magento_categories",
+    "options": "Item Magento Attribute",
+    "description": "Custom attribute code and value for Magento product"
+  },
+  {
+    "doctype": "Custom Field",
     "name": "Sales Order-magento_so_section_break",
     "dt": "Sales Order",
     "fieldname": "magento_so_section_break",

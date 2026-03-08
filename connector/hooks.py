@@ -20,6 +20,12 @@ fixtures = [
                 # Item custom fields — ERPNext site sync
                 "Item-erpnext_sync_section_break",
                 "Item-sync_to_erpnext_sites",
+                # Item custom fields — Magento Config tab
+                "Item-magento_config_section",
+                "Item-magento_attribute_set_id",
+                "Item-magento_attribute_set_name",
+                "Item-magento_categories",
+                "Item-magento_custom_attributes",
                 # Sales Order custom fields
                 "Sales Order-magento_order_id",
                 "Sales Order-magento_increment_id",

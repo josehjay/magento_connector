@@ -63,6 +63,7 @@ def _get_item_price(item_code, price_list):
 def _build_product_payload(doc):
     """
     Convert an ERPNext Item doc into a Magento product payload dict.
+    Uses Magento Config tab: attribute_set_id, magento_categories, magento_custom_attributes.
     Does NOT set stock — inventory is managed by inventory_sync.py.
     """
     settings = frappe.get_single("Magento Settings")
@@ -71,6 +72,43 @@ def _build_product_payload(doc):
 
     description = doc.description or doc.item_name or ""
 
+    attribute_set_id = 4
+    if doc.get("magento_attribute_set_id"):
+        try:
+            attribute_set_id = int(doc.magento_attribute_set_id)
+        except (TypeError, ValueError):
+            pass
+
+    custom_attributes = [
+        {"attribute_code": "description", "value": description},
+        {"attribute_code": "short_description", "value": description[:255]},
+    ]
+    if doc.get("magento_custom_attributes"):
+        for row in doc.magento_custom_attributes:
+            if row.get("attribute_code") and row.get("attribute_code") not in ("description", "short_description"):
+                custom_attributes.append({
+                    "attribute_code": row.attribute_code,
+                    "value": str(row.get("attribute_value") or ""),
+                })
+            elif row.get("attribute_code") in ("description", "short_description"):
+                custom_attributes = [c for c in custom_attributes if c["attribute_code"] != row["attribute_code"]]
+                custom_attributes.append({
+                    "attribute_code": row.attribute_code,
+                    "value": str(row.get("attribute_value") or ""),
+                })
+
+    extension_attributes = {
+        "stock_item": {
+            "manage_stock": True,
+            "qty": 0,
+            "is_in_stock": False,
+        }
+    }
+    if doc.get("magento_categories"):
+        extension_attributes["category_links"] = [
+            {"category_id": str(row.category_id)} for row in doc.magento_categories if row.get("category_id")
+        ]
+
     payload = {
         "sku": doc.item_code,
         "name": doc.item_name,
@@ -78,18 +116,9 @@ def _build_product_payload(doc):
         "status": 1 if doc.is_sales_item else 2,
         "visibility": 4,
         "type_id": "simple",
-        "attribute_set_id": 4,
-        "custom_attributes": [
-            {"attribute_code": "description", "value": description},
-            {"attribute_code": "short_description", "value": description[:255]},
-        ],
-        "extension_attributes": {
-            "stock_item": {
-                "manage_stock": True,
-                "qty": 0,
-                "is_in_stock": False,
-            }
-        },
+        "attribute_set_id": attribute_set_id,
+        "custom_attributes": custom_attributes,
+        "extension_attributes": extension_attributes,
     }
 
     if doc.get("weight_per_unit") and doc.weight_per_unit:
