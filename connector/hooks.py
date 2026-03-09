@@ -60,11 +60,14 @@ scheduler_events = {
         "*/15 * * * *": [
             "connector.tasks.sync_inventory",
         ],
-        # Order pull and product sync every 10 minutes
+        # Order pull and ERPNext site product sync every 10 minutes
         "*/10 * * * *": [
             "connector.tasks.sync_orders",
-            "connector.tasks.full_product_sync",
             "connector.tasks.erpnext_product_sync",
+        ],
+        # Magento full product sync every hour
+        "0 * * * *": [
+            "connector.tasks.full_product_sync",
         ],
         # Image URL sync and retry failed products every 30 minutes
         "*/30 * * * *": [
