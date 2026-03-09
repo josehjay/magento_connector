@@ -73,6 +73,9 @@ def sync_images():
     updated = 0
     skipped = 0
     failed = 0
+    # Commit every N updates to avoid holding the DB connection for the whole run
+    # (prevents "Lost connection to MySQL server during query" on large maps).
+    COMMIT_EVERY = 25
 
     for row in mapped:
         item_code = row["item_code"]
@@ -104,6 +107,8 @@ def sync_images():
 
         frappe.db.set_value("Item", item_code, image_field, base_image_url)
         updated += 1
+        if updated % COMMIT_EVERY == 0:
+            frappe.db.commit()
 
     if updated:
         frappe.db.commit()
@@ -121,6 +126,7 @@ def sync_images():
             "failed": failed,
         },
     )
+    frappe.db.commit()
 
 
 def _extract_base_image_url(media_entries, magento_url):
