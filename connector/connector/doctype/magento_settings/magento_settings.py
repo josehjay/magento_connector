@@ -24,20 +24,22 @@ class MagentoSettings(Document):
 
     @frappe.whitelist()
     def trigger_full_product_sync(self):
-        """Manually enqueue a full product sync."""
+        """Manually enqueue a full product sync (deduplicated by job_name)."""
         frappe.enqueue(
             "connector.tasks.full_product_sync",
             queue="long",
             timeout=3600,
+            job_name="connector_full_product_sync",
         )
         frappe.msgprint("Full product sync has been queued.", indicator="blue")
 
     @frappe.whitelist()
     def trigger_order_sync(self):
-        """Manually enqueue an order sync."""
+        """Manually enqueue an order sync (deduplicated by job_name)."""
         frappe.enqueue(
             "connector.tasks.sync_orders",
             queue="default",
             timeout=600,
+            job_name="connector_order_sync",
         )
         frappe.msgprint("Order sync has been queued.", indicator="blue")

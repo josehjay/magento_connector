@@ -60,22 +60,16 @@ scheduler_events = {
         "*/15 * * * *": [
             "connector.tasks.sync_inventory",
         ],
-        # Order pull every 10 minutes
+        # Order pull and product sync every 10 minutes
         "*/10 * * * *": [
             "connector.tasks.sync_orders",
-        ],
-        # Image URL sync every 30 minutes
-        "*/30 * * * *": [
-            "connector.tasks.sync_images",
-        ],
-        # Retry recently-failed products (with exponential backoff) every 30 minutes
-        "*/30 * * * *": [
-            "connector.tasks.retry_failed_product_sync",
-        ],
-        # Full product catch-up sync every hour
-        "0 * * * *": [
             "connector.tasks.full_product_sync",
             "connector.tasks.erpnext_product_sync",
+        ],
+        # Image URL sync and retry failed products every 30 minutes
+        "*/30 * * * *": [
+            "connector.tasks.sync_images",
+            "connector.tasks.retry_failed_product_sync",
         ],
     }
 }

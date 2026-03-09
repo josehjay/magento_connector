@@ -38,6 +38,7 @@ def on_sales_order_submit(doc, method):
         "connector.sync.status_sync.push_order_status_to_magento",
         queue="short",
         timeout=60,
+        job_name=f"magento_order_status_{magento_order_id}_processing",
         sales_order=doc.name,
         magento_order_id=magento_order_id,
         magento_status="processing",
@@ -61,6 +62,7 @@ def on_sales_order_cancel(doc, method):
         "connector.sync.status_sync.cancel_magento_order",
         queue="short",
         timeout=60,
+        job_name=f"magento_order_cancel_{magento_order_id}",
         sales_order=doc.name,
         magento_order_id=magento_order_id,
     )
