@@ -98,12 +98,38 @@ def _backoff_minutes(retry_count):
     return min(5 * (2 ** (retry_count - 1)), 60)
 
 
+def _get_variant_attributes(item_code):
+    """
+    Return list of {attribute_code, value} for an Item variant from Item Variant Attribute.
+    attribute_code is derived from Item Attribute name (lowercase, spaces to underscores)
+    for use as Magento custom_attributes / configurable option.
+    """
+    if not frappe.db.table_exists("Item Variant Attribute"):
+        return []
+    rows = frappe.get_all(
+        "Item Variant Attribute",
+        filters={"parent": item_code},
+        fields=["attribute", "attribute_value"],
+    )
+    out = []
+    for row in rows:
+        if not row.get("attribute"):
+            continue
+        # ERPNext "attribute" is the Item Attribute name (e.g. "Size", "Color")
+        code = (row.get("attribute") or "").strip().lower().replace(" ", "_")
+        if not code:
+            continue
+        value = (row.get("attribute_value") or "").strip()
+        out.append({"attribute_code": code, "value": value or ""})
+    return out
+
+
 def _build_product_payload(doc):
     """
     Convert an ERPNext Item doc into a Magento product payload dict.
-    Attribute set comes from Magento Settings → Item Group mapping.
-    Stock is managed separately by inventory_sync.py.
-    Disabled items sync as status=2 (Disabled) in Magento.
+    - Template (has_variants): type_id configurable.
+    - Variant (variant_of): type_id simple, with variant attributes in custom_attributes.
+    Attribute set from Magento Settings → Item Group. Stock via inventory_sync.
     """
     settings = frappe.get_single("Magento Settings")
     price = _get_item_price(doc.item_code, settings.price_list)
@@ -112,18 +138,29 @@ def _build_product_payload(doc):
 
     status = 2 if doc.get("disabled") else (1 if doc.is_sales_item else 2)
 
+    # Template (has_variants) → configurable; variant (variant_of) or standalone → simple
+    is_template = bool(doc.get("has_variants"))
+    type_id = "configurable" if is_template else "simple"
+
+    custom_attributes = [
+        {"attribute_code": "description", "value": description},
+        {"attribute_code": "short_description", "value": description[:255]},
+    ]
+
+    # Variant: add configurable-option attributes so Magento can link this simple to the configurable
+    if doc.get("variant_of"):
+        for attr in _get_variant_attributes(doc.item_code):
+            custom_attributes.append(attr)
+
     payload = {
         "sku": doc.item_code,
         "name": doc.item_name,
         "price": price,
         "status": status,
         "visibility": 4,
-        "type_id": "simple",
+        "type_id": type_id,
         "attribute_set_id": attribute_set_id,
-        "custom_attributes": [
-            {"attribute_code": "description", "value": description},
-            {"attribute_code": "short_description", "value": description[:255]},
-        ],
+        "custom_attributes": custom_attributes,
         "extension_attributes": {
             "stock_item": {
                 "manage_stock": True,
@@ -296,8 +333,44 @@ def push_item_to_magento(item_code):
             response_payload=result,
         )
 
+        # If this item is a variant, link it to the configurable product in Magento
+        if doc.get("variant_of"):
+            _link_variant_to_configurable(client, doc.variant_of, doc.item_code)
+
     except (MagentoAPIError, Exception) as e:
         _handle_push_failure(item_code, e, payload)
+
+
+def _link_variant_to_configurable(client, parent_item_code, variant_sku):
+    """
+    Link a simple product (variant) to its configurable parent in Magento.
+    parent_item_code = ERPNext template Item code (= Magento configurable SKU).
+    Skips if already linked; logs and continues on API errors (e.g. parent not synced yet).
+    """
+    try:
+        children = client.get_configurable_children(parent_item_code)
+        existing_skus = set()
+        for c in children or []:
+            if isinstance(c, dict) and c.get("sku"):
+                existing_skus.add(c["sku"])
+            elif isinstance(c, str):
+                existing_skus.add(c)
+        if variant_sku in existing_skus:
+            return
+        client.add_child_to_configurable(parent_item_code, variant_sku)
+        frappe.logger("connector").info(
+            f"Linked variant {variant_sku} to configurable {parent_item_code} in Magento."
+        )
+    except MagentoAPIError as e:
+        # Parent may not exist yet, or already linked; don't fail the variant push
+        frappe.logger("connector").warning(
+            f"Could not link variant {variant_sku} to configurable {parent_item_code}: {e}"
+        )
+    except Exception as e:
+        frappe.log_error(
+            f"Link variant to configurable: {e}\n{frappe.get_traceback()}",
+            "Connector: Link Variant to Configurable",
+        )
 
 
 def _handle_push_failure(item_code, exc, payload=None):
@@ -390,7 +463,7 @@ def full_product_sync():
     items = frappe.get_all(
         "Item",
         filters=filters,
-        fields=["item_code", "modified", "magento_last_synced_on"],
+        fields=["item_code", "modified", "magento_last_synced_on", "has_variants", "variant_of"],
     )
 
     to_sync = [
@@ -399,6 +472,10 @@ def full_product_sync():
         if not item.get("magento_last_synced_on")
         or (item.get("modified") and item["magento_last_synced_on"] < item["modified"])
     ]
+
+    # Process templates (configurable) before variants so the configurable exists when we link
+    by_code = {item["item_code"]: item for item in items}
+    to_sync.sort(key=lambda c: (0 if (by_code.get(c) or {}).get("has_variants") else 1, c))
 
     if not to_sync:
         frappe.logger("connector").info("full_product_sync: nothing stale to sync.")

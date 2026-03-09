@@ -183,6 +183,35 @@ class MagentoClient:
         self._request("DELETE", f"/products/{requests.utils.quote(sku, safe='')}")
 
     # ------------------------------------------------------------------
+    # Configurable products (template = parent, variants = children)
+    # ------------------------------------------------------------------
+
+    def add_child_to_configurable(self, parent_sku, child_sku):
+        """
+        Link a simple product (variant) to a configurable product.
+        POST /V1/configurable-products/{parentSku}/child
+        """
+        self.post(
+            f"/configurable-products/{requests.utils.quote(parent_sku, safe='')}/child",
+            data={"childSku": child_sku},
+        )
+
+    def get_configurable_children(self, parent_sku):
+        """
+        GET /V1/configurable-products/{parentSku}/children
+        Returns list of child product dicts (each has 'sku' etc.).
+        """
+        try:
+            result = self.get(
+                f"/configurable-products/{requests.utils.quote(parent_sku, safe='')}/children"
+            )
+            return result if isinstance(result, list) else []
+        except MagentoAPIError as e:
+            if e.status_code == 404:
+                return []
+            raise
+
+    # ------------------------------------------------------------------
     # Product media
     # ------------------------------------------------------------------
 
