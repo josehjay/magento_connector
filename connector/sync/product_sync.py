@@ -441,42 +441,21 @@ def _run_batch_product_sync(item_codes):
 
 
 # ---------------------------------------------------------------------------
-# Scheduled: full catch-up sync (single job processes all items in batches)
+# Scheduled: full catch-up sync (chunked: one job per chunk, reschedules next chunk)
 # ---------------------------------------------------------------------------
 
-# Single job name so only one full sync runs at a time; no per-batch job flood.
+# Single job name so only one full-sync chunk runs at a time.
 FULL_SYNC_JOB_NAME = "magento_full_product_sync"
-# Timeout for the single long-running job (1 hour).
-FULL_SYNC_JOB_TIMEOUT = 3600
+# Items per chunk; each chunk runs in one job and stays within timeout.
+FULL_SYNC_CHUNK_SIZE = 100
+# Timeout per chunk (seconds); ~FULL_SYNC_CHUNK_SIZE * 15s per item.
+FULL_SYNC_CHUNK_TIMEOUT = 1800
 
 
-def run_full_product_sync(item_codes):
+def _get_stale_item_codes_to_sync():
     """
-    Process all item_codes in batches inside this single background job.
-    Called via enqueue with job_name=FULL_SYNC_JOB_NAME so only one runs at a time.
+    Return sorted list of item codes that are stale or never synced (templates first).
     """
-    if not item_codes:
-        return
-    logger = frappe.logger("connector")
-    total = len(item_codes)
-    for start in range(0, total, BATCH_SIZE):
-        batch = item_codes[start : start + BATCH_SIZE]
-        try:
-            _run_batch_product_sync(batch)
-        except Exception as e:
-            logger.warning(f"run_full_product_sync: batch at {start} failed: {e}")
-            frappe.log_error(str(e), "Connector Full Product Sync Batch")
-    logger.info(f"run_full_product_sync: finished {total} items in batches of {BATCH_SIZE}.")
-
-
-def full_product_sync():
-    """
-    Find all Items that are stale or never synced and enqueue a single job
-    that processes them in batches internally. Only one job is added to the queue.
-    """
-    if not _is_sync_enabled():
-        return
-
     filters = {"sync_to_magento": 1}
     allowed_groups = _get_allowed_item_groups()
     if allowed_groups:
@@ -495,24 +474,73 @@ def full_product_sync():
         or (item.get("modified") and item["magento_last_synced_on"] < item["modified"])
     ]
 
-    # Process templates (configurable) before variants so the configurable exists when we link
     by_code = {item["item_code"]: item for item in items}
     to_sync.sort(key=lambda c: (0 if (by_code.get(c) or {}).get("has_variants") else 1, c))
+    return to_sync
 
+
+def run_full_product_sync_chunk():
+    """
+    Process one chunk of stale items, then enqueue the next chunk if more remain.
+    Re-queries stale list each run so progress is persisted. Only one job with
+    FULL_SYNC_JOB_NAME runs at a time.
+    """
+    if not _is_sync_enabled():
+        return
+
+    to_sync = _get_stale_item_codes_to_sync()
+    if not to_sync:
+        frappe.logger("connector").info("run_full_product_sync_chunk: no stale items.")
+        return
+
+    chunk = to_sync[:FULL_SYNC_CHUNK_SIZE]
+    remaining = len(to_sync) - len(chunk)
+
+    frappe.logger("connector").info(
+        f"run_full_product_sync_chunk: processing {len(chunk)} items ({remaining} remaining)."
+    )
+    try:
+        _run_batch_product_sync(chunk)
+    except Exception as e:
+        frappe.log_error(str(e), "Connector Full Product Sync Chunk")
+        raise
+
+    if remaining > 0:
+        frappe.enqueue(
+            "connector.sync.product_sync.run_full_product_sync_chunk",
+            queue="long",
+            timeout=FULL_SYNC_CHUNK_TIMEOUT,
+            job_name=FULL_SYNC_JOB_NAME,
+            enqueue_after_commit=True,
+        )
+        frappe.logger("connector").info(
+            f"run_full_product_sync_chunk: enqueued next chunk ({remaining} items left)."
+        )
+
+
+def full_product_sync():
+    """
+    Enqueue one chunk job to start the full sync. That job processes a fixed number
+    of items, then enqueues the next chunk if more stale items remain. At most one
+    chunk job runs at a time; avoids timeout on 10k+ items.
+    """
+    if not _is_sync_enabled():
+        return
+
+    to_sync = _get_stale_item_codes_to_sync()
     if not to_sync:
         frappe.logger("connector").info("full_product_sync: nothing stale to sync.")
         return
 
     frappe.enqueue(
-        "connector.sync.product_sync.run_full_product_sync",
+        "connector.sync.product_sync.run_full_product_sync_chunk",
         queue="long",
-        timeout=FULL_SYNC_JOB_TIMEOUT,
+        timeout=FULL_SYNC_CHUNK_TIMEOUT,
         job_name=FULL_SYNC_JOB_NAME,
         enqueue_after_commit=True,
-        item_codes=to_sync,
     )
     frappe.logger("connector").info(
-        f"full_product_sync: enqueued 1 job to process {len(to_sync)} items."
+        f"full_product_sync: enqueued 1 chunk job ({len(to_sync)} stale items total)."
     )
 
 
