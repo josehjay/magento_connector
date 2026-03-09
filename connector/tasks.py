@@ -78,9 +78,9 @@ def full_product_sync():
     if not _is_magento_enabled():
         return
 
-    if _has_pending_jobs("magento_full_sync_batch") or _has_pending_jobs("magento_retry_batch"):
+    if _has_pending_jobs("magento_full_product_sync") or _has_pending_jobs("magento_retry_failed_sync"):
         frappe.logger("connector").info(
-            "full_product_sync: existing Magento product sync jobs in queue; skipping this run.",
+            "full_product_sync: existing Magento product sync job in queue; skipping this run.",
         )
         return
 

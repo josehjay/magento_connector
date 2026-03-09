@@ -441,16 +441,38 @@ def _run_batch_product_sync(item_codes):
 
 
 # ---------------------------------------------------------------------------
-# Scheduled: full catch-up sync (hourly)
+# Scheduled: full catch-up sync (single job processes all items in batches)
 # ---------------------------------------------------------------------------
+
+# Single job name so only one full sync runs at a time; no per-batch job flood.
+FULL_SYNC_JOB_NAME = "magento_full_product_sync"
+# Timeout for the single long-running job (1 hour).
+FULL_SYNC_JOB_TIMEOUT = 3600
+
+
+def run_full_product_sync(item_codes):
+    """
+    Process all item_codes in batches inside this single background job.
+    Called via enqueue with job_name=FULL_SYNC_JOB_NAME so only one runs at a time.
+    """
+    if not item_codes:
+        return
+    logger = frappe.logger("connector")
+    total = len(item_codes)
+    for start in range(0, total, BATCH_SIZE):
+        batch = item_codes[start : start + BATCH_SIZE]
+        try:
+            _run_batch_product_sync(batch)
+        except Exception as e:
+            logger.warning(f"run_full_product_sync: batch at {start} failed: {e}")
+            frappe.log_error(str(e), "Connector Full Product Sync Batch")
+    logger.info(f"run_full_product_sync: finished {total} items in batches of {BATCH_SIZE}.")
+
 
 def full_product_sync():
     """
-    Hourly catch-up: find all Items that are stale or have never been synced
-    and dispatch them in BATCH_SIZE chunks to the `long` queue.
-
-    Deduplication: each batch job uses a stable job_name so re-runs of
-    full_product_sync cannot pile up duplicate jobs in the queue.
+    Find all Items that are stale or never synced and enqueue a single job
+    that processes them in batches internally. Only one job is added to the queue.
     """
     if not _is_sync_enabled():
         return
@@ -481,9 +503,16 @@ def full_product_sync():
         frappe.logger("connector").info("full_product_sync: nothing stale to sync.")
         return
 
-    _dispatch_batches(to_sync, job_prefix="magento_full_sync_batch")
+    frappe.enqueue(
+        "connector.sync.product_sync.run_full_product_sync",
+        queue="long",
+        timeout=FULL_SYNC_JOB_TIMEOUT,
+        job_name=FULL_SYNC_JOB_NAME,
+        enqueue_after_commit=True,
+        item_codes=to_sync,
+    )
     frappe.logger("connector").info(
-        f"full_product_sync: dispatched {len(to_sync)} items in batches of {BATCH_SIZE}."
+        f"full_product_sync: enqueued 1 job to process {len(to_sync)} items."
     )
 
 
@@ -558,25 +587,3 @@ def retry_failed_product_sync():
     )
 
 
-# ---------------------------------------------------------------------------
-# Internal: enqueue batches with deduplication
-# ---------------------------------------------------------------------------
-
-def _dispatch_batches(item_codes, job_prefix):
-    """
-    Split item_codes into BATCH_SIZE chunks and enqueue each as a single
-    background job on the `long` queue.
-
-    job_name is deterministic per prefix+offset so that if full_product_sync
-    fires again before the previous batch finishes, no duplicate job is added.
-    """
-    for start in range(0, len(item_codes), BATCH_SIZE):
-        batch = item_codes[start: start + BATCH_SIZE]
-        frappe.enqueue(
-            "connector.sync.product_sync._run_batch_product_sync",
-            queue="long",
-            timeout=BATCH_JOB_TIMEOUT,
-            job_name=f"{job_prefix}_{start}",
-            enqueue_after_commit=True,
-            item_codes=batch,
-        )
