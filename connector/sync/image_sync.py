@@ -76,12 +76,20 @@ def sync_images():
     # Commit every N updates to avoid holding the DB connection for the whole run
     # (prevents "Lost connection to MySQL server during query" on large maps).
     COMMIT_EVERY = 25
+    # Limit items per run so we stay well within the job timeout. Remaining
+    # items will be picked up on the next scheduled run.
+    MAX_ITEMS_PER_RUN = 200
+
+    processed = 0
 
     for row in mapped:
+        if processed >= MAX_ITEMS_PER_RUN:
+            break
         item_code = row["item_code"]
         sku = row["magento_sku"] or item_code
 
         try:
+            processed += 1
             media_entries = client.get_product_media(sku)
         except MagentoAPIError as e:
             failed += 1

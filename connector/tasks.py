@@ -62,9 +62,20 @@ def sync_images():
     """Every 30 minutes: pull Magento base image URLs into ERPNext item_image."""
     if not _is_magento_enabled():
         return
+    # Avoid hitting the scheduler's 300s timeout by enqueueing a separate
+    # long-queue job with a higher timeout, and deduplicate via job_name.
     try:
-        from connector.sync.image_sync import sync_images as _sync
-        _sync()
+        if _has_pending_jobs("connector_image_sync"):
+            frappe.logger("connector").info(
+                "sync_images: image sync job already queued/running; skipping this run.",
+            )
+            return
+        frappe.enqueue(
+            "connector.sync.image_sync.sync_images",
+            queue="long",
+            timeout=900,
+            job_name="connector_image_sync",
+        )
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Connector Scheduled: sync_images failed")
 
