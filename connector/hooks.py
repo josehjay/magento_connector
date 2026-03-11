@@ -65,8 +65,8 @@ scheduler_events = {
             "connector.tasks.sync_orders",
             "connector.tasks.erpnext_product_sync",
         ],
-        # Magento full product sync every 4 hours
-        "0 */4 * * *": [
+        # Magento full product sync once daily at 1 AM
+        "0 1 * * *": [
             "connector.tasks.full_product_sync",
         ],
         # Image URL sync and retry failed products every 30 minutes
