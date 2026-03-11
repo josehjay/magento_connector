@@ -151,6 +151,32 @@ class MagentoClient:
             data={"product": payload},
         )
 
+    def update_product_global_scope(self, sku, payload):
+        """
+        PUT /rest/all/V1/products/{sku} — update attributes in the 'all' store scope.
+
+        In Magento, 'name' (and other store-view-scoped attributes) are NOT updated
+        globally when you PUT to a specific store code endpoint (e.g. /rest/default/).
+        Sending the same payload to /rest/all/ ensures the change is applied across
+        all store views. Price is a global attribute and does not need this.
+        """
+        url = f"{self.base_url}/rest/all/V1/products/{requests.utils.quote(sku, safe='')}"
+        try:
+            resp = self.session.request(
+                "PUT",
+                url,
+                json={"product": payload},
+                timeout=60,
+            )
+            if resp.status_code >= 400:
+                frappe.logger("connector").warning(
+                    f"Global-scope product update [{resp.status_code}] for {sku}: {resp.text[:300]}"
+                )
+        except Exception as e:
+            frappe.logger("connector").warning(
+                f"Global-scope product update request failed for {sku}: {e}"
+            )
+
     def update_stock(self, sku, qty):
         """
         PUT /V1/products/{sku}/stockItems/1

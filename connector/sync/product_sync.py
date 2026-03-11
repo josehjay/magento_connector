@@ -333,6 +333,14 @@ def push_item_to_magento(item_code):
             response_payload=result,
         )
 
+        # Magento's 'name' is store-view scoped, so a store-specific PUT only updates
+        # that one store view. Push name + status to the 'all' scope so it is visible
+        # across every store view (price is globally scoped and doesn't need this).
+        client.update_product_global_scope(item_code, {
+            "name": doc.item_name,
+            "status": payload.get("status", 1),
+        })
+
         # If this item is a variant, link it to the configurable product in Magento
         if doc.get("variant_of"):
             _link_variant_to_configurable(client, doc.variant_of, doc.item_code)

@@ -55,10 +55,14 @@ def sync_images():
         return
     magento_url = magento_url.rstrip("/")
 
+    # Order by last_synced_on ascending (nulls first) so items that haven't had
+    # their image checked recently are processed first, cycling through all items
+    # across successive runs instead of always re-checking the same first N.
     mapped = frappe.get_all(
         "Magento Product Map",
         filters={"sync_status": "Synced"},
         fields=["item_code", "magento_sku"],
+        order_by="last_synced_on asc",
     )
 
     if not mapped:
@@ -72,57 +76,78 @@ def sync_images():
 
     updated = 0
     skipped = 0
+    no_media = 0
     failed = 0
-    # Commit every N updates to avoid holding the DB connection for the whole run
-    # (prevents "Lost connection to MySQL server during query" on large maps).
+    # Commit every N updates to avoid holding the DB connection for the whole run.
     COMMIT_EVERY = 25
-    # Limit items per run so we stay well within the job timeout. Remaining
-    # items will be picked up on the next scheduled run.
+    # Limit items per run. Order by last_synced_on so we rotate through all items
+    # over successive runs rather than always processing the same first N.
     MAX_ITEMS_PER_RUN = 200
 
-    processed = 0
+    logger = frappe.logger("connector")
+    logger.info(f"sync_images: starting, {len(mapped)} mapped items (processing up to {MAX_ITEMS_PER_RUN}).")
 
-    for row in mapped:
-        if processed >= MAX_ITEMS_PER_RUN:
-            break
+    for row in mapped[:MAX_ITEMS_PER_RUN]:
         item_code = row["item_code"]
         sku = row["magento_sku"] or item_code
 
         try:
-            processed += 1
             media_entries = client.get_product_media(sku)
         except MagentoAPIError as e:
             failed += 1
-            frappe.logger("connector").warning(
-                f"Image sync failed for {item_code}: {e}"
-            )
+            logger.warning(f"sync_images: Magento API error for {item_code} (sku={sku}): {e}")
             continue
         except Exception as e:
             failed += 1
-            frappe.log_error(str(e), f"Magento Image Sync Error: {item_code}")
+            frappe.log_error(frappe.get_traceback(), f"Magento Image Sync Error: {item_code}")
+            continue
+
+        if not media_entries:
+            no_media += 1
+            logger.debug(f"sync_images: no media entries in Magento for {item_code} (sku={sku}).")
             continue
 
         base_image_url = _extract_base_image_url(media_entries, magento_url)
 
         if not base_image_url:
-            skipped += 1
+            no_media += 1
+            logger.debug(f"sync_images: media entries found but no base image type for {item_code}.")
             continue
 
-        current_image = frappe.db.get_value("Item", item_code, image_field)
+        try:
+            current_image = frappe.db.get_value("Item", item_code, image_field)
+        except Exception as e:
+            failed += 1
+            frappe.log_error(str(e), f"sync_images: get_value failed for {item_code}")
+            continue
+
         if current_image == base_image_url:
             skipped += 1
             continue
 
-        frappe.db.set_value("Item", item_code, image_field, base_image_url)
-        updated += 1
+        try:
+            # update_modified=False: image sync must not mark the item as stale for
+            # product sync (the image URL is not part of the Magento product payload).
+            frappe.db.set_value(
+                "Item", item_code, image_field, base_image_url,
+                update_modified=False,
+            )
+            updated += 1
+            logger.debug(f"sync_images: updated image for {item_code} → {base_image_url}")
+        except Exception as e:
+            failed += 1
+            frappe.log_error(str(e), f"sync_images: set_value failed for {item_code} field={image_field}")
+            continue
+
         if updated % COMMIT_EVERY == 0:
             frappe.db.commit()
 
     if updated:
         frappe.db.commit()
 
-    frappe.logger("connector").info(
-        f"sync_images: {updated} updated, {skipped} skipped, {failed} failed."
+    logger.info(
+        f"sync_images: done — {updated} updated, {skipped} already current, "
+        f"{no_media} no media in Magento, {failed} errors."
     )
 
     create_log(
@@ -130,8 +155,10 @@ def sync_images():
         status="Success" if not failed else "Failed",
         response_payload={
             "updated": updated,
-            "skipped": skipped,
+            "skipped_already_current": skipped,
+            "no_media_in_magento": no_media,
             "failed": failed,
+            "total_processed": min(len(mapped), MAX_ITEMS_PER_RUN),
         },
     )
     frappe.db.commit()
