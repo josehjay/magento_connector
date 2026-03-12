@@ -92,9 +92,10 @@ def sync_orders():
 
     if not orders:
         logger.info("sync_orders: Magento returned 0 orders. Nothing to process.")
-        # Advance cursor only if the fetch itself succeeded (no exception above).
+        # Advance cursor by current server time — no Magento timestamps available.
         frappe.db.set_single_value(
-            "Magento Settings", "last_order_sync_time", frappe.utils.now_datetime()
+            "Magento Settings", "last_order_sync_time",
+            _safe_now()
         )
         frappe.db.commit()
         return {"status": "ok", "orders_fetched": 0}
@@ -131,9 +132,11 @@ def sync_orders():
     # Advance cursor only when at least one order was successfully imported/updated,
     # or when all were legitimately skipped (cancelled, already imported).
     # If ALL orders failed, keep the cursor so they are retried next run.
+    # Use Magento's own updated_at timestamps to avoid server-clock / timezone drift.
     if not failed or imported or updated:
         frappe.db.set_single_value(
-            "Magento Settings", "last_order_sync_time", frappe.utils.now_datetime()
+            "Magento Settings", "last_order_sync_time",
+            _cursor_from_orders(orders)
         )
         frappe.db.commit()
 
@@ -185,16 +188,24 @@ def _process_order(order, client):
         return "skipped"
 
     # ----- Customer -----
+    # Always create/find the real buyer's customer record — we need it for the
+    # shipping address even when a default billing customer is configured.
     try:
-        customer_name = get_or_create_customer(order)
+        real_customer_name = get_or_create_customer(order)
     except Exception as e:
         frappe.log_error(frappe.get_traceback(), f"Order #{magento_increment_id}: customer creation failed")
         raise RuntimeError(f"Customer creation failed: {e}") from e
 
+    # If a default "Web Sales"-style customer is configured, bill to that
+    # customer; otherwise bill to the real buyer directly.
+    settings_snap = frappe.get_single("Magento Settings")
+    default_customer = (settings_snap.get("default_customer") or "").strip()
+    so_customer = default_customer if default_customer else real_customer_name
+
     # ----- Address -----
     address_name = None
     try:
-        address_name = get_or_create_address(order, customer_name)
+        address_name = get_or_create_address(order, real_customer_name)
     except Exception as e:
         # Address is not mandatory — log and continue
         logger.warning(f"Order #{magento_increment_id}: address creation failed (continuing): {e}")
@@ -225,18 +236,17 @@ def _process_order(order, client):
     taxes = _build_taxes_and_charges(order)
 
     # ----- Build Sales Order -----
-    settings = frappe.get_single("Magento Settings")
-    lead_time = int(settings.lead_time_days or 3)
+    lead_time = int(settings_snap.lead_time_days or 3)
     delivery_date = add_days(nowdate(), lead_time)
 
     company = _get_default_company()
 
     so = frappe.new_doc("Sales Order")
     # Explicitly set mandatory header fields before set_missing_values runs,
-    # because background jobs have no user session to pull defaults from.
+    # because background jobs has no user session to pull defaults from.
     if company:
         so.company = company
-    so.customer = customer_name
+    so.customer = so_customer
     so.delivery_date = delivery_date
     so.order_type = "Sales"
     so.currency = _get_valid_currency(order.get("order_currency_code"))
@@ -260,7 +270,19 @@ def _process_order(order, client):
 
     note = MAGENTO_STATUS_NOTES.get(magento_status, f"Magento status: {magento_status}")
     so.po_no = str(magento_increment_id)
-    so.remarks = f"Imported from Magento. Order #{magento_increment_id}. Status: {note}"
+
+    # Build human-readable buyer summary for remarks
+    billing = order.get("billing_address") or {}
+    buyer_first = (billing.get("firstname") or order.get("customer_firstname") or "").strip()
+    buyer_last  = (billing.get("lastname")  or order.get("customer_lastname")  or "").strip()
+    buyer_name  = f"{buyer_first} {buyer_last}".strip()
+    buyer_email = (order.get("customer_email") or "").strip()
+    buyer_phone = (billing.get("telephone") or "").strip()
+
+    buyer_parts = [p for p in [buyer_name, buyer_email, buyer_phone] if p]
+    buyer_info  = f" | Buyer: {' | '.join(buyer_parts)}" if buyer_parts else ""
+
+    so.remarks = f"Magento Order #{magento_increment_id}.{buyer_info} Status: {note}"
 
     for item_row in items:
         so.append("items", item_row)
@@ -297,7 +319,7 @@ def _process_order(order, client):
         doctype_name="Sales Order",
         document_name=so.name,
         magento_id=magento_increment_id,
-        response_payload={"sales_order": so.name, "customer": customer_name},
+        response_payload={"sales_order": so.name, "customer": so_customer, "buyer": real_customer_name},
     )
     return "imported"
 
@@ -312,6 +334,39 @@ def _get_default_company():
         # Final fallback: first company in the system
         company = frappe.db.get_value("Company", {}, "name")
     return company
+
+
+def _safe_now():
+    """Return current time as a clean YYYY-MM-DD HH:MM:SS string (no microseconds)."""
+    return str(frappe.utils.now_datetime()).split(".")[0]
+
+
+def _cursor_from_orders(orders):
+    """
+    Derive the next sync cursor from the MAX updated_at across the fetched orders.
+
+    This avoids timezone drift: Magento stores updated_at in UTC.  ERPNext's
+    now_datetime() uses the server's local clock (which may be UTC+3 on a Kenya
+    server).  If we store a server-local timestamp and compare it against
+    Magento's UTC timestamps the filter drifts by the UTC offset and new orders
+    are silently excluded.
+
+    By using Magento's own timestamp (+ 1 second buffer) as the cursor we stay
+    in the same timezone as the data we're querying against.
+    """
+    from datetime import datetime, timedelta
+    max_ts = None
+    for o in orders:
+        ts = (o.get("updated_at") or "").strip()[:19]  # strip microseconds
+        if ts and (max_ts is None or ts > max_ts):
+            max_ts = ts
+    if max_ts:
+        try:
+            dt = datetime.strptime(max_ts, "%Y-%m-%d %H:%M:%S")
+            return (dt + timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            pass
+    return _safe_now()
 
 
 def _get_valid_currency(currency_code):

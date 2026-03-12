@@ -465,13 +465,23 @@ class MagentoSettings(Document):
                 indicator="orange",
             )
         elif result:
-            fetched = result.get("total_fetched") or result.get("orders_fetched", 0)
+            fetched   = result.get("total_fetched") or result.get("orders_fetched", 0)
+            imported  = result.get("imported", 0)
+            updated   = result.get("updated", 0)
+            skipped   = result.get("skipped", 0)
+            failed    = result.get("failed", 0)
+            parts = [
+                f"{fetched} orders fetched",
+                f"{imported} imported",
+                f"{updated} updated",
+            ]
+            if skipped:
+                parts.append(f"{skipped} skipped (cancelled / no matching items)")
+            if failed:
+                parts.append(f"{failed} errors — see Error Log for details")
             frappe.msgprint(
-                f"Order sync complete: {fetched} orders from Magento, "
-                f"{result.get('imported', 0)} imported, "
-                f"{result.get('updated', 0)} updated, "
-                f"{result.get('failed', 0)} errors.",
-                indicator="green" if not result.get("failed") else "orange",
+                "Order sync complete: " + ", ".join(parts) + ".",
+                indicator="green" if not failed else "orange",
             )
         else:
             frappe.msgprint("Order sync finished.", indicator="blue")

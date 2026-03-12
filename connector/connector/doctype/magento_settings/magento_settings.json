@@ -18,6 +18,9 @@
   "column_break_2",
   "price_list",
   "lead_time_days",
+  "order_import_section",
+  "default_customer",
+  "column_break_order",
   "item_group_filter_section",
   "magento_item_groups",
   "sync_section",
@@ -101,6 +104,22 @@
    "options": "Price List",
    "reqd": 1,
    "description": "Price list used as source for product prices synced to Magento"
+  },
+  {
+   "fieldname": "order_import_section",
+   "fieldtype": "Section Break",
+   "label": "Order Import Settings"
+  },
+  {
+   "fieldname": "default_customer",
+   "fieldtype": "Link",
+   "label": "Default Customer for Online Orders",
+   "options": "Customer",
+   "description": "If set, all Magento orders will be billed to this customer (e.g. 'Web Sales'). The actual buyer's address is still saved and used as the shipping address. Leave blank to create/match individual customers."
+  },
+  {
+   "fieldname": "column_break_order",
+   "fieldtype": "Column Break"
   },
   {
    "fieldname": "item_group_filter_section",
