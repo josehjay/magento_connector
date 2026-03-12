@@ -122,7 +122,7 @@
 
             frm.add_custom_button(__("Reset Order Sync Cursor"), function () {
                 frappe.confirm(
-                    __("This will clear the Last Order Sync Time so the next sync fetches orders from the last 30 days. Continue?"),
+                    __("This will clear the Last Order Sync Time so the next sync fetches orders from the last 90 days. Continue?"),
                     function () {
                         frappe.call({
                             doc: frm.doc,
@@ -131,6 +131,15 @@
                         });
                     }
                 );
+            }, __("Actions"));
+
+            frm.add_custom_button(__("Test Order Import"), function () {
+                frappe.call({
+                    doc: frm.doc,
+                    method: "test_order_import",
+                    freeze: true,
+                    freeze_message: __("Tracing order import chain — no records will be created…"),
+                });
             }, __("Actions"));
 
             frm.add_custom_button(__("Purge Old Logs (30d)"), function () {

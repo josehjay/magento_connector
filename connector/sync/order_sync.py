@@ -73,10 +73,13 @@ def sync_orders():
     # the entire order history which times out on large Magento catalogs.
     if not last_sync:
         from datetime import datetime, timedelta
-        last_sync = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
-        logger.info(f"sync_orders: first run — defaulting to last 30 days ({last_sync}).")
+        last_sync = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d %H:%M:%S")
+        logger.info(f"sync_orders: first run — defaulting to last 90 days ({last_sync}).")
     else:
-        logger.info(f"sync_orders: fetching orders updated after {last_sync}.")
+        # Normalise to YYYY-MM-DD HH:MM:SS — strip microseconds and any timezone suffix
+        last_sync_str = str(last_sync).split(".")[0].split("+")[0].strip()
+        logger.info(f"sync_orders: fetching orders updated after {last_sync_str}.")
+        last_sync = last_sync_str
 
     try:
         client = MagentoClient()
@@ -226,11 +229,23 @@ def _process_order(order, client):
     lead_time = int(settings.lead_time_days or 3)
     delivery_date = add_days(nowdate(), lead_time)
 
+    company = _get_default_company()
+
     so = frappe.new_doc("Sales Order")
+    # Explicitly set mandatory header fields before set_missing_values runs,
+    # because background jobs have no user session to pull defaults from.
+    if company:
+        so.company = company
     so.customer = customer_name
     so.delivery_date = delivery_date
     so.order_type = "Sales"
     so.currency = _get_valid_currency(order.get("order_currency_code"))
+
+    # Ensure the selling price list is set (mandatory in ERPNext)
+    if not so.selling_price_list:
+        default_pl = frappe.db.get_single_value("Selling Settings", "selling_price_list")
+        if default_pl:
+            so.selling_price_list = default_pl
 
     if address_name:
         try:
@@ -255,6 +270,17 @@ def _process_order(order, client):
 
     so.flags.ignore_permissions = True
 
+    # Trigger ERPNext's own defaulting and calculation hooks
+    try:
+        so.run_method("set_missing_values")
+    except Exception as e:
+        logger.warning(f"Order #{magento_increment_id}: set_missing_values warning (non-fatal): {e}")
+
+    try:
+        so.run_method("calculate_taxes_and_totals")
+    except Exception as e:
+        logger.warning(f"Order #{magento_increment_id}: calculate_taxes_and_totals warning (non-fatal): {e}")
+
     try:
         so.insert()
     except Exception as e:
@@ -274,6 +300,18 @@ def _process_order(order, client):
         response_payload={"sales_order": so.name, "customer": customer_name},
     )
     return "imported"
+
+
+def _get_default_company():
+    """Return the default ERPNext company. Works in background jobs where there is no user session."""
+    company = (
+        frappe.defaults.get_defaults().get("company")
+        or frappe.db.get_single_value("Global Defaults", "default_company")
+    )
+    if not company:
+        # Final fallback: first company in the system
+        company = frappe.db.get_value("Company", {}, "name")
+    return company
 
 
 def _get_valid_currency(currency_code):

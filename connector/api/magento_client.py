@@ -265,6 +265,9 @@ class MagentoClient:
         if updated_after:
             if isinstance(updated_after, datetime):
                 updated_after = updated_after.strftime("%Y-%m-%d %H:%M:%S")
+            elif isinstance(updated_after, str):
+                # Strip microseconds / timezone suffix — Magento expects YYYY-MM-DD HH:MM:SS
+                updated_after = updated_after.split(".")[0].split("+")[0].strip()
             params["searchCriteria[filterGroups][0][filters][0][field]"] = "updated_at"
             params["searchCriteria[filterGroups][0][filters][0][value]"] = updated_after
             params["searchCriteria[filterGroups][0][filters][0][conditionType]"] = "gt"

@@ -262,7 +262,7 @@ class MagentoSettings(Document):
         frappe.db.commit()
         frappe.msgprint(
             "Order sync cursor has been reset. "
-            "The next sync will fetch orders from the last 30 days.",
+            "The next sync will fetch orders from the last 90 days.",
             indicator="green",
         )
 
@@ -278,6 +278,181 @@ class MagentoSettings(Document):
             f"Deleted sync logs older than {days} days (cutoff: {cutoff}).",
             indicator="green",
         )
+
+    @frappe.whitelist()
+    def test_order_import(self):
+        """
+        Fetch the first available Magento order (no date filter) and trace every step
+        of the import chain WITHOUT creating any ERPNext records.
+        Displays exactly where the import would fail so the user can fix it.
+        """
+        from connector.api.magento_client import MagentoClient, MagentoAPIError
+        from connector.sync.order_sync import _get_default_company, _get_valid_currency
+        from connector.connector.doctype.magento_order_map.magento_order_map import is_order_imported
+
+        lines = []
+
+        def add(msg=""):
+            lines.append(msg)
+
+        def show():
+            report = "\n".join(lines)
+            frappe.msgprint(
+                f"<pre style='white-space:pre-wrap;font-size:12px;max-height:600px;overflow:auto'>{report}</pre>",
+                title="Order Import Diagnostic",
+                wide=True,
+            )
+            return report
+
+        add("=== ORDER IMPORT DIAGNOSTIC ===")
+        add("Fetches the first Magento order (bypassing date filter) and")
+        add("traces every import step. Nothing is created or modified.")
+        add()
+
+        # ── 1. API connection ──────────────────────────────────────────────
+        add("--- Step 1: Magento API ---")
+        try:
+            client = MagentoClient()
+            add(f"  OK — connected to {client.api_base}")
+        except Exception as e:
+            add(f"  FAILED: {e}")
+            return show()
+        add()
+
+        # ── 2. Fetch first order ───────────────────────────────────────────
+        add("--- Step 2: Fetch First Order (no date filter) ---")
+        try:
+            orders = client.get_orders(updated_after=None, page=1, page_size=1)
+        except Exception as e:
+            add(f"  FAILED to fetch orders: {e}")
+            return show()
+
+        if not orders:
+            add("  Magento returned 0 orders even without a date filter.")
+            add("  Check: Does your integration token have Sales API permissions?")
+            return show()
+
+        order = orders[0]
+        increment_id = order.get("increment_id", "?")
+        entity_id = order.get("entity_id")
+        status = order.get("status", "")
+        currency = order.get("order_currency_code", "?")
+        add(f"  Order #{increment_id}  entity_id={entity_id}  status={status}  currency={currency}")
+        add(f"  Already imported: {bool(is_order_imported(entity_id))}")
+        add()
+
+        # ── 3. Line-item analysis ─────────────────────────────────────────
+        add("--- Step 3: Line Items ---")
+        magento_items = order.get("items") or []
+        any_match = False
+        for mi in magento_items:
+            sku = (mi.get("sku") or "").strip()
+            ptype = mi.get("product_type", "?")
+            qty = float(mi.get("qty_ordered") or 0)
+            if qty <= 0:
+                continue
+            if ptype in ("configurable", "bundle"):
+                add(f"  SKU: {sku:<30} type={ptype}  ← parent row, will be skipped")
+                continue
+            exists = bool(frappe.db.exists("Item", sku)) if sku else False
+            mark = "✓" if exists else "✗ NOT FOUND"
+            add(f"  SKU: {sku:<30} type={ptype}  qty={qty}  in ERPNext: {mark}")
+            if exists:
+                any_match = True
+
+        if not any_match:
+            add()
+            add("  ⚠ NO items matched an ERPNext item_code.")
+            add("  The order will be SKIPPED with status 'no matching items'.")
+            add("  Fix: Make sure item_code in ERPNext equals the Magento SKU exactly.")
+            add("  (Check capitalization, leading zeros, variant suffixes.)")
+        else:
+            add(f"  At least one item matched — line items will be created.")
+        add()
+
+        # ── 4. Customer ───────────────────────────────────────────────────
+        add("--- Step 4: Customer ---")
+        email = (order.get("customer_email") or "").strip().lower()
+        magento_cust_id = order.get("customer_id")
+        is_guest = bool(order.get("customer_is_guest"))
+        billing = order.get("billing_address") or {}
+        name_parts = " ".join(filter(None, [
+            (billing.get("firstname") or order.get("customer_firstname") or "").strip(),
+            (billing.get("lastname") or order.get("customer_lastname") or "").strip(),
+        ])) or email or "Unknown Customer"
+
+        existing_cust = None
+        if not is_guest and magento_cust_id:
+            existing_cust = frappe.db.get_value("Customer", {"magento_customer_id": magento_cust_id}, "name")
+        if not existing_cust and email:
+            existing_cust = frappe.db.get_value("Customer", {"email_id": email}, "name")
+
+        add(f"  Name derived: '{name_parts}'  email: {email or '(none)'}  guest: {is_guest}")
+        if existing_cust:
+            add(f"  Existing ERPNext customer: {existing_cust}  ← will be reused")
+        else:
+            cg = frappe.db.get_single_value("Selling Settings", "customer_group") or "(none)"
+            tr = frappe.db.get_single_value("Selling Settings", "territory") or "(none)"
+            add(f"  No existing customer — will create new (group={cg}, territory={tr})")
+        add()
+
+        # ── 5. Company / Price List / Currency ────────────────────────────
+        add("--- Step 5: Company / Price List / Currency ---")
+        company = _get_default_company()
+        add(f"  Default company  : {company or '⚠ NOT SET — SO insert will fail!'}")
+
+        selling_pl = frappe.db.get_single_value("Selling Settings", "selling_price_list")
+        add(f"  Selling price list: {selling_pl or '⚠ NOT SET — may fail validation'}")
+
+        resolved_currency = _get_valid_currency(currency)
+        add(f"  Order currency   : {currency}  →  resolved to '{resolved_currency}'")
+        add()
+
+        # ── 6. Taxes / Shipping accounts ─────────────────────────────────
+        add("--- Step 6: Tax & Shipping Accounts ---")
+        tax_amount = float(order.get("tax_amount") or 0)
+        ship_amount = float(order.get("shipping_amount") or 0)
+        if tax_amount > 0:
+            tax_acct = frappe.db.get_value(
+                "Account", {"account_type": "Tax", "company": company, "disabled": 0}, "name"
+            )
+            add(f"  Tax amount {tax_amount}  → account: {tax_acct or '⚠ NOT FOUND — tax row will be skipped'}")
+        else:
+            add(f"  No tax on this order.")
+        if ship_amount > 0:
+            freight_acct = frappe.db.get_value(
+                "Account",
+                {"account_name": ["like", "%freight%"], "company": company, "disabled": 0},
+                "name",
+            ) or frappe.db.get_value(
+                "Account",
+                {"account_name": ["like", "%shipping%"], "company": company, "disabled": 0},
+                "name",
+            )
+            add(f"  Shipping amount {ship_amount}  → account: {freight_acct or '(not found — row skipped, OK)'}")
+        else:
+            add(f"  No shipping on this order.")
+        add()
+
+        # ── 7. Summary ────────────────────────────────────────────────────
+        add("--- Summary ---")
+        issues = []
+        if not company:
+            issues.append("Default company not configured (Global Defaults).")
+        if not selling_pl:
+            issues.append("No selling price list in Selling Settings.")
+        if not any_match:
+            issues.append("No Magento SKUs match ERPNext item_codes.")
+        if issues:
+            add("  Issues that must be fixed before orders can import:")
+            for i in issues:
+                add(f"    • {i}")
+        else:
+            add("  No blocking issues detected.")
+            add("  If orders still fail, check ERPNext > Error Log for details after running")
+            add("  Actions → Sync Orders Now.")
+
+        return show()
 
     @frappe.whitelist()
     def trigger_order_sync_now(self):
