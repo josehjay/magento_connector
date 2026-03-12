@@ -111,7 +111,8 @@ def on_item_save(doc, method):
             "connector.sync.erpnext_product_sync.push_item_to_site",
             queue="default",
             timeout=120,
-            job_name=f"erpnext_push_{site_name}_{doc.item_code}",
+            job_id=f"erpnext_push_{site_name}_{doc.item_code}",
+            deduplicate=True,
             item_code=doc.item_code,
             remote_site=site_name,
         )
@@ -137,7 +138,8 @@ def push_item_to_all_sites(item_code):
             "connector.sync.erpnext_product_sync.push_item_to_site",
             queue="default",
             timeout=120,
-            job_name=f"erpnext_push_{site_name}_{item_code}",
+            job_id=f"erpnext_push_{site_name}_{item_code}",
+            deduplicate=True,
             item_code=item_code,
             remote_site=site_name,
         )
@@ -255,7 +257,8 @@ def full_erpnext_product_sync():
                     timeout=120,
                     item_code=item["item_code"],
                     remote_site=site_name,
-                    job_name=f"erpnext_sync_{site_name}_{item['item_code']}",
+                    job_id=f"erpnext_sync_{site_name}_{item['item_code']}",
+                    deduplicate=True,
                 )
                 queued += 1
 

@@ -202,7 +202,8 @@ def on_item_save(doc, method):
                 "connector.sync.product_sync.remove_from_magento",
                 queue="default",
                 timeout=60,
-                job_name=f"magento_remove_{doc.item_code}",
+                job_id=f"magento_remove_{doc.item_code}",
+                deduplicate=True,
                 enqueue_after_commit=True,
                 item_code=doc.item_code,
             )
@@ -215,7 +216,8 @@ def on_item_save(doc, method):
         "connector.sync.product_sync.push_item_to_magento",
         queue="default",
         timeout=120,
-        job_name=f"magento_product_sync_{doc.item_code}",
+        job_id=f"magento_product_sync_{doc.item_code}",
+        deduplicate=True,
         enqueue_after_commit=True,
         item_code=doc.item_code,
     )
@@ -518,7 +520,8 @@ def run_full_product_sync_chunk():
             "connector.sync.product_sync.run_full_product_sync_chunk",
             queue="long",
             timeout=FULL_SYNC_CHUNK_TIMEOUT,
-            job_name=FULL_SYNC_JOB_NAME,
+            job_id=FULL_SYNC_JOB_NAME,
+            deduplicate=True,
             enqueue_after_commit=True,
         )
         frappe.logger("connector").info(
@@ -544,7 +547,8 @@ def full_product_sync():
         "connector.sync.product_sync.run_full_product_sync_chunk",
         queue="long",
         timeout=FULL_SYNC_CHUNK_TIMEOUT,
-        job_name=FULL_SYNC_JOB_NAME,
+        job_id=FULL_SYNC_JOB_NAME,
+        deduplicate=True,
         enqueue_after_commit=True,
     )
     frappe.logger("connector").info(
@@ -614,7 +618,8 @@ def retry_failed_product_sync():
         "connector.sync.product_sync._run_batch_product_sync",
         queue="long",
         timeout=BATCH_JOB_TIMEOUT,
-        job_name="magento_retry_failed_sync",
+        job_id="magento_retry_failed_sync",
+        deduplicate=True,
         enqueue_after_commit=True,
         item_codes=due,
     )

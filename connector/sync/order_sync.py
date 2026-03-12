@@ -33,39 +33,67 @@ MAGENTO_STATUS_NOTES = {
 }
 
 
-def _is_magento_enabled():
+def _is_sync_enabled():
     try:
-        return bool(frappe.db.get_single_value("Connector Settings", "enable_magento_integration"))
+        enabled = frappe.db.get_single_value("Connector Settings", "enable_magento_integration")
+        if enabled is not None and not bool(enabled):
+            return False
     except Exception:
-        return True
+        pass
+    return bool(frappe.db.get_single_value("Magento Settings", "sync_enabled"))
+
+
+@frappe.whitelist()
+def run_order_sync_now():
+    """
+    Whitelisted entry point for running order sync directly (not enqueued).
+    Use from Magento Settings "Sync Orders Now" button or bench execute.
+    Runs synchronously in the current process.
+    """
+    frappe.logger("connector").info("run_order_sync_now: starting direct order sync.")
+    result = sync_orders()
+    frappe.logger("connector").info(f"run_order_sync_now: done. result={result}")
+    return result
 
 
 def sync_orders():
     """
     Main scheduled entry point.
     Pulls all orders updated since last sync time and processes them.
+    Returns a summary dict.
     """
-    if not _is_magento_enabled():
-        return
+    logger = frappe.logger("connector")
 
-    sync_enabled = frappe.db.get_single_value("Magento Settings", "sync_enabled")
-    if not sync_enabled:
-        return
+    if not _is_sync_enabled():
+        logger.info("sync_orders: skipped — sync is disabled.")
+        return {"status": "skipped", "reason": "sync_disabled"}
 
     settings = frappe.get_single("Magento Settings")
     last_sync = settings.last_order_sync_time
+
+    logger.info(f"sync_orders: fetching orders updated after {last_sync or 'ALL TIME (first run)'}.")
 
     try:
         client = MagentoClient()
         orders = client.get_all_new_orders(updated_after=last_sync)
     except Exception as e:
-        frappe.log_error(str(e), "Magento Order Sync: Failed to fetch orders")
+        frappe.log_error(frappe.get_traceback(), "Magento Order Sync: Failed to fetch orders")
         create_log(
             operation="Order Pull",
             status="Failed",
             error_message=str(e),
         )
-        return
+        return {"status": "error", "reason": f"fetch_failed: {e}"}
+
+    if not orders:
+        logger.info("sync_orders: Magento returned 0 orders. Nothing to process.")
+        frappe.db.set_single_value(
+            "Magento Settings", "last_order_sync_time", frappe.utils.now_datetime()
+        )
+        frappe.db.commit()
+        return {"status": "ok", "orders_fetched": 0}
+
+    logger.info(f"sync_orders: fetched {len(orders)} orders from Magento.")
 
     imported = 0
     updated = 0
@@ -94,28 +122,46 @@ def sync_orders():
                 error_message=str(e),
             )
 
-    frappe.db.set_single_value(
-        "Magento Settings", "last_order_sync_time", frappe.utils.now_datetime()
-    )
-    frappe.db.commit()
+    # Only advance the sync cursor if at least one order was processed successfully.
+    # This ensures failed orders are retried on the next run.
+    if imported or updated:
+        frappe.db.set_single_value(
+            "Magento Settings", "last_order_sync_time", frappe.utils.now_datetime()
+        )
+        frappe.db.commit()
+    elif not failed:
+        # All orders were skipped (cancelled, already imported, etc.) — still advance cursor
+        frappe.db.set_single_value(
+            "Magento Settings", "last_order_sync_time", frappe.utils.now_datetime()
+        )
+        frappe.db.commit()
 
-    frappe.logger("connector").info(
-        f"sync_orders: {imported} imported, {updated} updated, "
-        f"{skipped} skipped, {failed} failed out of {len(orders)} orders."
-    )
+    summary = {
+        "total_fetched": len(orders),
+        "imported": imported,
+        "updated": updated,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+    logger.info(f"sync_orders: done — {summary}")
 
     if imported or updated:
         create_log(
             operation="Order Pull",
             status="Success",
-            response_payload={
-                "total": len(orders),
-                "imported": imported,
-                "updated": updated,
-                "skipped": skipped,
-                "failed": failed,
-            },
+            response_payload=summary,
         )
+
+    if failed and not imported and not updated:
+        create_log(
+            operation="Order Pull",
+            status="Failed",
+            error_message=f"All {failed} orders failed to import.",
+            response_payload=summary,
+        )
+
+    return summary
 
 
 def _process_order(order, client):
@@ -145,11 +191,18 @@ def _process_order(order, client):
 
     items = _build_order_items(order)
     if not items:
+        frappe.logger("connector").warning(
+            f"sync_orders: order {magento_increment_id} has no matching ERPNext items. "
+            f"Magento line items: {[m.get('sku') for m in (order.get('items') or [])]}"
+        )
         create_log(
             operation="Order Pull",
             status="Failed",
             magento_id=magento_increment_id,
-            error_message=f"No valid items found for order {magento_increment_id}",
+            error_message=(
+                f"No valid items found for order {magento_increment_id}. "
+                f"SKUs from Magento: {[m.get('sku') for m in (order.get('items') or [])]}"
+            ),
         )
         return "skipped"
 

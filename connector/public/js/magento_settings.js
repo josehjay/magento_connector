@@ -65,8 +65,9 @@
                     var found_row = rows.find(function (r) { return r.label === values.row_index; });
                     if (!found_row) return;
                     var idx = found_row.value;
+                    var chosen_id = String(values.attribute_set || "").split("|")[0];
                     var chosen = items.find(function (s) {
-                        return String(s.attribute_set_id) === String(values.attribute_set);
+                        return String(s.attribute_set_id) === chosen_id;
                     });
                     if (chosen && frm.doc.magento_item_groups[idx]) {
                         var row = frm.doc.magento_item_groups[idx];
@@ -140,13 +141,31 @@
                 });
             }, __("Actions"));
 
-            frm.add_custom_button(__("Sync Orders Now"), function () {
+            frm.add_custom_button(__("Sync Orders Now (Background)"), function () {
                 frappe.call({
                     doc: frm.doc,
                     method: "trigger_order_sync",
                     callback: function () {
                         frappe.show_alert({ message: __("Order sync queued."), indicator: "blue" });
                     },
+                });
+            }, __("Actions"));
+
+            frm.add_custom_button(__("Sync Images Now"), function () {
+                frappe.call({
+                    doc: frm.doc,
+                    method: "trigger_image_sync",
+                    freeze: true,
+                    freeze_message: __("Running image sync — this may take a few minutes…"),
+                });
+            }, __("Actions"));
+
+            frm.add_custom_button(__("Sync Orders Now"), function () {
+                frappe.call({
+                    doc: frm.doc,
+                    method: "trigger_order_sync_now",
+                    freeze: true,
+                    freeze_message: __("Pulling orders from Magento…"),
                 });
             }, __("Actions"));
         },

@@ -6,7 +6,7 @@ to the relevant sync module.
 """
 
 import frappe
-from frappe.utils.background_jobs import get_jobs
+from frappe.utils.background_jobs import is_job_enqueued
 
 
 def _is_magento_enabled():
@@ -23,17 +23,12 @@ def _is_erpnext_site_sync_enabled():
         return False
 
 
-def _has_pending_jobs(prefix, queue_name="long"):
-    """Return True if any queued/running job in the given queue has a job_name starting with prefix."""
+def _is_job_running(job_id):
+    """Return True if a job with the exact job_id is queued or currently running."""
     try:
-        jobs = get_jobs(site=frappe.local.site) or {}
+        return is_job_enqueued(job_id)
     except Exception:
         return False
-    for job in jobs.get(queue_name, []):
-        name = (job.get("job_name") or "")
-        if name.startswith(prefix):
-            return True
-    return False
 
 
 def sync_inventory():
@@ -50,6 +45,7 @@ def sync_inventory():
 def sync_orders():
     """Every 10 minutes: pull new/updated Magento orders into ERPNext."""
     if not _is_magento_enabled():
+        frappe.logger("connector").info("sync_orders: skipped — Magento integration disabled.")
         return
     try:
         from connector.sync.order_sync import sync_orders as _sync
@@ -59,39 +55,40 @@ def sync_orders():
 
 
 def sync_images():
-    """Every 30 minutes: pull Magento base image URLs into ERPNext item_image."""
+    """Every 30 minutes: pull Magento base image URLs into ERPNext Item image field."""
     if not _is_magento_enabled():
+        frappe.logger("connector").info("sync_images: skipped — Magento integration disabled.")
         return
-    # Avoid hitting the scheduler's 300s timeout by enqueueing a separate
-    # long-queue job with a higher timeout, and deduplicate via job_name.
+
+    job_id = "connector_image_sync"
+    if _is_job_running(job_id):
+        frappe.logger("connector").info("sync_images: image sync job already running; skipping.")
+        return
+
     try:
-        if _has_pending_jobs("connector_image_sync"):
-            frappe.logger("connector").info(
-                "sync_images: image sync job already queued/running; skipping this run.",
-            )
-            return
         frappe.enqueue(
             "connector.sync.image_sync.sync_images",
             queue="long",
             timeout=900,
-            job_name="connector_image_sync",
+            job_id=job_id,
+            deduplicate=True,
         )
+        frappe.logger("connector").info("sync_images: enqueued image sync job.")
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Connector Scheduled: sync_images failed")
 
 
 def full_product_sync():
-    """Every 10 minutes: push all stale/unsynced ERPNext items to Magento.
+    """Daily: push all stale/unsynced ERPNext items to Magento.
 
-    Skips if there are still long-queue batch jobs for a previous full/retry
-    run (job_name starts with \"magento_full_sync_batch\" or \"magento_retry_batch\").
+    Skips if a full-sync chunk or retry job is already running.
     """
     if not _is_magento_enabled():
         return
 
-    if _has_pending_jobs("magento_full_product_sync") or _has_pending_jobs("magento_retry_failed_sync"):
+    if _is_job_running("magento_full_product_sync") or _is_job_running("magento_retry_failed_sync"):
         frappe.logger("connector").info(
-            "full_product_sync: existing Magento product sync job in queue; skipping this run.",
+            "full_product_sync: existing Magento product sync job running; skipping."
         )
         return
 
@@ -114,17 +111,13 @@ def retry_failed_product_sync():
 
 
 def erpnext_product_sync():
-    """Every 10 minutes: push stale/unsynced ERPNext items to remote ERPNext sites.
-
-    Skips if there are still long-queue ERPNext site sync jobs in the queue
-    (job_name starts with \"erpnext_sync_\").
-    """
+    """Every 10 minutes: push stale/unsynced ERPNext items to remote ERPNext sites."""
     if not _is_erpnext_site_sync_enabled():
         return
 
-    if _has_pending_jobs("erpnext_sync_"):
+    if _is_job_running("erpnext_full_site_sync"):
         frappe.logger("connector").info(
-            "erpnext_product_sync: existing ERPNext site sync jobs in queue; skipping this run.",
+            "erpnext_product_sync: existing ERPNext site sync job running; skipping."
         )
         return
 
