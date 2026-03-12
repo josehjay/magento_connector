@@ -120,6 +120,32 @@
                 open_pick_attribute_set_dialog(frm);
             }, __("Actions"));
 
+            frm.add_custom_button(__("Reset Order Sync Cursor"), function () {
+                frappe.confirm(
+                    __("This will clear the Last Order Sync Time so the next sync fetches orders from the last 30 days. Continue?"),
+                    function () {
+                        frappe.call({
+                            doc: frm.doc,
+                            method: "reset_order_sync_cursor",
+                            callback: function () { frm.reload_doc(); },
+                        });
+                    }
+                );
+            }, __("Actions"));
+
+            frm.add_custom_button(__("Purge Old Logs (30d)"), function () {
+                frappe.confirm(
+                    __("Delete all Magento Sync Log entries older than 30 days?"),
+                    function () {
+                        frappe.call({
+                            doc: frm.doc,
+                            method: "purge_old_logs",
+                            args: { days: 30 },
+                        });
+                    }
+                );
+            }, __("Actions"));
+
             frm.add_custom_button(__("Diagnose Sync"), function () {
                 frappe.call({
                     doc: frm.doc,

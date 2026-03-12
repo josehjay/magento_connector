@@ -253,6 +253,33 @@ class MagentoSettings(Document):
             frappe.msgprint("Image sync finished.", indicator="blue")
 
     @frappe.whitelist()
+    def reset_order_sync_cursor(self):
+        """
+        Clear last_order_sync_time so the next sync fetches orders from the last 30 days.
+        Use this when orders are missing because the cursor skipped past them.
+        """
+        frappe.db.set_single_value("Magento Settings", "last_order_sync_time", None)
+        frappe.db.commit()
+        frappe.msgprint(
+            "Order sync cursor has been reset. "
+            "The next sync will fetch orders from the last 30 days.",
+            indicator="green",
+        )
+
+    @frappe.whitelist()
+    def purge_old_logs(self, days=30):
+        """Delete Magento Sync Log entries older than `days` days."""
+        days = int(days or 30)
+        from frappe.utils import add_days, nowdate
+        cutoff = add_days(nowdate(), -days)
+        deleted = frappe.db.delete("Magento Sync Log", {"synced_on": ["<", cutoff]})
+        frappe.db.commit()
+        frappe.msgprint(
+            f"Deleted sync logs older than {days} days (cutoff: {cutoff}).",
+            indicator="green",
+        )
+
+    @frappe.whitelist()
     def trigger_order_sync_now(self):
         """Run order sync directly (synchronous) so the user can see results immediately."""
         from connector.sync.order_sync import sync_orders

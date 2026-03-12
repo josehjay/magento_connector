@@ -9,6 +9,33 @@ import frappe
 from frappe.utils import cstr
 
 
+def _get_customer_group():
+    """Return the default customer group, falling back gracefully."""
+    # 1. Use Selling Settings default
+    group = frappe.db.get_single_value("Selling Settings", "customer_group")
+    if group and frappe.db.exists("Customer Group", group):
+        return group
+    # 2. Try common names
+    for name in ("All Customer Groups", "All", "Commercial", "Individual"):
+        if frappe.db.exists("Customer Group", name):
+            return name
+    # 3. Use the first available group
+    first = frappe.db.get_value("Customer Group", {}, "name")
+    return first or "All Customer Groups"
+
+
+def _get_territory():
+    """Return the default territory, falling back gracefully."""
+    territory = frappe.db.get_single_value("Selling Settings", "territory")
+    if territory and frappe.db.exists("Territory", territory):
+        return territory
+    for name in ("All Territories", "All", "Rest Of The World"):
+        if frappe.db.exists("Territory", name):
+            return name
+    first = frappe.db.get_value("Territory", {}, "name")
+    return first or "All Territories"
+
+
 def get_or_create_customer(magento_order):
     """
     Find or create an ERPNext Customer from a Magento order dict.
@@ -26,7 +53,6 @@ def get_or_create_customer(magento_order):
     existing = None
 
     if not is_guest and magento_customer_id:
-        # Look up by Magento customer ID
         existing = frappe.db.get_value(
             "Customer",
             {"magento_customer_id": magento_customer_id},
@@ -34,7 +60,6 @@ def get_or_create_customer(magento_order):
         )
 
     if not existing and email:
-        # Fall back to email match (handles guest re-orders or pre-existing customers)
         existing = frappe.db.get_value(
             "Customer",
             {"email_id": email},
@@ -42,7 +67,6 @@ def get_or_create_customer(magento_order):
         )
 
     if existing:
-        # Update Magento customer ID if missing
         if not is_guest and magento_customer_id:
             current_id = frappe.db.get_value("Customer", existing, "magento_customer_id")
             if not current_id:
@@ -54,14 +78,17 @@ def get_or_create_customer(magento_order):
     customer = frappe.new_doc("Customer")
     customer.customer_name = customer_name
     customer.customer_type = "Individual"
-    customer.customer_group = frappe.db.get_single_value("Selling Settings", "customer_group") or "All Customer Groups"
-    customer.territory = frappe.db.get_single_value("Selling Settings", "territory") or "All Territories"
-    customer.email_id = email
+    customer.customer_group = _get_customer_group()
+    customer.territory = _get_territory()
+
+    if email:
+        customer.email_id = email
 
     if not is_guest and magento_customer_id:
         customer.magento_customer_id = magento_customer_id
 
-    customer.insert(ignore_permissions=True)
+    customer.flags.ignore_permissions = True
+    customer.insert()
     frappe.db.commit()
     return customer.name
 
@@ -69,11 +96,7 @@ def get_or_create_customer(magento_order):
 def get_or_create_address(magento_order, customer_name):
     """
     Create or update the shipping address for a customer.
-    Returns the ERPNext Address name.
-
-    Shipping address is in:
-      order.extension_attributes.shipping_assignments[0].shipping.address
-    Fallback: order.billing_address
+    Returns the ERPNext Address name, or None if address data is missing.
     """
     shipping_address = None
     ext = magento_order.get("extension_attributes") or {}
@@ -101,10 +124,9 @@ def get_or_create_address(magento_order, customer_name):
     country_code = addr_data.get("country_id") or "US"
     phone = addr_data.get("telephone") or ""
 
-    # Map ISO country code to ERPNext country name
     country = _get_country_name(country_code)
 
-    # Check if address already exists for this customer
+    # Check if an address already exists for this customer
     existing_addr = frappe.db.get_value(
         "Dynamic Link",
         {
@@ -116,22 +138,26 @@ def get_or_create_address(magento_order, customer_name):
     )
 
     if existing_addr:
-        # Update existing address
-        frappe.db.set_value(
-            "Address",
-            existing_addr,
-            {
-                "address_line1": address_line1,
-                "address_line2": address_line2,
-                "city": city,
-                "state": state,
-                "pincode": pincode,
-                "country": country,
-                "phone": phone,
-                "address_type": "Shipping",
-            },
-        )
-        frappe.db.commit()
+        try:
+            frappe.db.set_value(
+                "Address",
+                existing_addr,
+                {
+                    "address_line1": address_line1 or "N/A",
+                    "address_line2": address_line2,
+                    "city": city or "N/A",
+                    "state": state,
+                    "pincode": pincode,
+                    "country": country,
+                    "phone": phone,
+                    "address_type": "Shipping",
+                },
+            )
+            frappe.db.commit()
+        except Exception as e:
+            frappe.logger("connector").warning(
+                f"get_or_create_address: could not update existing address {existing_addr}: {e}"
+            )
         return existing_addr
 
     # Create new address
@@ -149,7 +175,8 @@ def get_or_create_address(magento_order, customer_name):
         "link_doctype": "Customer",
         "link_name": customer_name,
     })
-    addr.insert(ignore_permissions=True)
+    addr.flags.ignore_permissions = True
+    addr.insert()
     frappe.db.commit()
     return addr.name
 
