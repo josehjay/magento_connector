@@ -71,7 +71,14 @@ def sync_orders():
     settings = frappe.get_single("Magento Settings")
     last_sync = settings.last_order_sync_time
 
-    logger.info(f"sync_orders: fetching orders updated after {last_sync or 'ALL TIME (first run)'}.")
+    # On first run (no last_sync), don't try to fetch the entire order history —
+    # that can time out on large Magento catalogs. Default to the last 30 days.
+    if not last_sync:
+        from datetime import datetime, timedelta
+        last_sync = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+        logger.info(f"sync_orders: first run — defaulting to orders from the last 30 days ({last_sync}).")
+    else:
+        logger.info(f"sync_orders: fetching orders updated after {last_sync}.")
 
     try:
         client = MagentoClient()

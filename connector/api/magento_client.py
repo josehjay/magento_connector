@@ -87,9 +87,10 @@ class MagentoClient:
     # HTTP helpers
     # ------------------------------------------------------------------
 
-    def _request(self, method, endpoint, data=None, params=None):
-        """Execute an HTTP request with retry on rate-limit (429)."""
+    def _request(self, method, endpoint, data=None, params=None, timeout=None):
+        """Execute an HTTP request with retry on rate-limit (429) and timeouts."""
         url = f"{self.api_base}{endpoint}"
+        req_timeout = timeout or (10, 120)  # (connect_timeout, read_timeout)
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
                 resp = self.session.request(
@@ -97,7 +98,7 @@ class MagentoClient:
                     url,
                     json=data,
                     params=params,
-                    timeout=60,
+                    timeout=req_timeout,
                 )
                 if resp.status_code == 429:
                     wait = self.RETRY_BACKOFF ** attempt
@@ -120,8 +121,8 @@ class MagentoClient:
                     raise MagentoAPIError(f"Request failed after {self.MAX_RETRIES} attempts: {e}")
                 time.sleep(self.RETRY_BACKOFF ** attempt)
 
-    def get(self, endpoint, params=None):
-        return self._request("GET", endpoint, params=params)
+    def get(self, endpoint, params=None, timeout=None):
+        return self._request("GET", endpoint, params=params, timeout=timeout)
 
     def post(self, endpoint, data=None):
         return self._request("POST", endpoint, data=data)
@@ -249,10 +250,11 @@ class MagentoClient:
     # Orders
     # ------------------------------------------------------------------
 
-    def get_orders(self, updated_after=None, page=1, page_size=50):
+    def get_orders(self, updated_after=None, page=1, page_size=20):
         """
         GET /V1/orders with optional updated_at filter.
-        Returns list of order dicts from items[].
+        Uses a longer timeout (5 min) because the orders endpoint is
+        heavy on large Magento catalogs.
         """
         params = {
             "searchCriteria[pageSize]": page_size,
@@ -267,19 +269,20 @@ class MagentoClient:
             params["searchCriteria[filterGroups][0][filters][0][value]"] = updated_after
             params["searchCriteria[filterGroups][0][filters][0][conditionType]"] = "gt"
 
-        result = self.get("/orders", params=params)
+        result = self.get("/orders", params=params, timeout=(15, 300))
         return result.get("items", [])
 
     def get_all_new_orders(self, updated_after=None):
         """Paginate through all orders updated after the given datetime."""
         all_orders = []
         page = 1
+        page_size = 20
         while True:
-            batch = self.get_orders(updated_after=updated_after, page=page, page_size=50)
+            batch = self.get_orders(updated_after=updated_after, page=page, page_size=page_size)
             if not batch:
                 break
             all_orders.extend(batch)
-            if len(batch) < 50:
+            if len(batch) < page_size:
                 break
             page += 1
         return all_orders
