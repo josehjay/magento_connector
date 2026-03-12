@@ -120,6 +120,15 @@
                 open_pick_attribute_set_dialog(frm);
             }, __("Actions"));
 
+            frm.add_custom_button(__("Diagnose Sync"), function () {
+                frappe.call({
+                    doc: frm.doc,
+                    method: "diagnose_sync",
+                    freeze: true,
+                    freeze_message: __("Running sync diagnostics — checking all prerequisites…"),
+                });
+            }, __("Actions"));
+
             frm.add_custom_button(__("Test Connection"), function () {
                 frappe.call({
                     doc: frm.doc,

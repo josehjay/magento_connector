@@ -347,8 +347,83 @@ def push_item_to_magento(item_code):
         if doc.get("variant_of"):
             _link_variant_to_configurable(client, doc.variant_of, doc.item_code)
 
+        # Pull image and other data back from Magento into ERPNext
+        image_result = _pull_magento_data_for_item(client, item_code)
+
+        return {
+            "success": True,
+            "magento_product_id": magento_product_id,
+            "image": image_result,
+        }
+
     except (MagentoAPIError, Exception) as e:
         _handle_push_failure(item_code, e, payload)
+        return {"success": False, "error": str(e)}
+
+
+def _pull_magento_data_for_item(client, item_code):
+    """
+    After a successful product push, pull image and other product data back
+    from Magento into ERPNext. This runs inline (not enqueued) so the user
+    sees the result immediately when clicking "Push to Magento".
+
+    Returns a dict describing what was pulled.
+    """
+    from connector.sync.image_sync import _extract_base_image_url, _get_item_image_field
+
+    result = {"image_updated": False, "image_url": None, "error": None}
+
+    image_field = _get_item_image_field()
+    if not image_field:
+        result["error"] = "no_image_field_on_item"
+        return result
+
+    magento_url = frappe.db.get_single_value("Magento Settings", "magento_url")
+    if not magento_url:
+        result["error"] = "no_magento_url"
+        return result
+    magento_url = magento_url.rstrip("/")
+
+    sku = item_code
+    try:
+        media_entries = client.get_product_media(sku)
+    except Exception as e:
+        result["error"] = f"media_fetch_failed: {e}"
+        frappe.logger("connector").warning(
+            f"_pull_magento_data_for_item: media fetch failed for {item_code}: {e}"
+        )
+        return result
+
+    if not media_entries:
+        result["error"] = "no_media_in_magento"
+        return result
+
+    base_image_url = _extract_base_image_url(media_entries, magento_url)
+    if not base_image_url:
+        result["error"] = "no_base_image_type"
+        return result
+
+    result["image_url"] = base_image_url
+
+    try:
+        current_image = frappe.db.get_value("Item", item_code, image_field)
+        if current_image != base_image_url:
+            frappe.db.set_value(
+                "Item", item_code, image_field, base_image_url,
+                update_modified=False,
+            )
+            frappe.db.commit()
+            result["image_updated"] = True
+            frappe.logger("connector").info(
+                f"_pull_magento_data_for_item: image updated for {item_code} → {base_image_url}"
+            )
+    except Exception as e:
+        result["error"] = f"image_save_failed: {e}"
+        frappe.logger("connector").warning(
+            f"_pull_magento_data_for_item: image save failed for {item_code}: {e}"
+        )
+
+    return result
 
 
 def _link_variant_to_configurable(client, parent_item_code, variant_sku):

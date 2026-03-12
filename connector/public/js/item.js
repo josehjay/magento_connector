@@ -18,11 +18,20 @@ frappe.ui.form.on("Item", {
                     method: "connector.sync.product_sync.push_item_to_magento",
                     args: { item_code: frm.doc.item_code },
                     freeze: true,
-                    freeze_message: __("Pushing to Magento..."),
+                    freeze_message: __("Pushing to Magento and pulling data back…"),
                     callback(r) {
                         if (!r.exc) {
+                            var result = r.message || {};
+                            var parts = [__("Item pushed to Magento.")];
+                            if (result.image && result.image.image_updated) {
+                                parts.push(__("Image synced from Magento."));
+                            } else if (result.image && result.image.image_url) {
+                                parts.push(__("Image already up to date."));
+                            } else if (result.image && result.image.error === "no_media_in_magento") {
+                                parts.push(__("No image found in Magento for this product."));
+                            }
                             frappe.show_alert({
-                                message: __("Item pushed to Magento successfully."),
+                                message: parts.join(" "),
                                 indicator: "green",
                             });
                             frm.reload_doc();
