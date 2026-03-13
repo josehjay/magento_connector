@@ -60,9 +60,12 @@ scheduler_events = {
         "*/15 * * * *": [
             "connector.tasks.sync_inventory",
         ],
-        # Order pull and ERPNext site product sync every 10 minutes
-        "*/10 * * * *": [
+        # Order pull every 4 hours (real-time push handled by Magento extension)
+        "0 */4 * * *": [
             "connector.tasks.sync_orders",
+        ],
+        # ERPNext site product sync every 10 minutes
+        "*/10 * * * *": [
             "connector.tasks.erpnext_product_sync",
         ],
         # Magento full product sync once daily at 1 AM

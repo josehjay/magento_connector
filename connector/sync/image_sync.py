@@ -46,6 +46,42 @@ def run_image_sync_now():
     return result
 
 
+@frappe.whitelist()
+def receive_image_update(sku, image_url):
+    """
+    Push endpoint: the Magento Kitabu_ErpNextConnector module calls this
+    whenever a product's base image is saved.  Updates the linked ERPNext
+    Item image field immediately without a full image sync run.
+    """
+    logger = frappe.logger("connector")
+
+    if not _is_sync_enabled():
+        logger.info("receive_image_update: skipped — sync is disabled.")
+        return {"ok": False, "reason": "sync_disabled"}
+
+    image_field = _get_item_image_field()
+    if not image_field:
+        logger.warning("receive_image_update: no image field found on Item doctype.")
+        return {"ok": False, "reason": "no_image_field"}
+
+    item_code = frappe.db.get_value(
+        "Magento Product Map", {"magento_sku": sku}, "item_code"
+    )
+    if not item_code:
+        logger.warning(f"receive_image_update: SKU '{sku}' not found in Magento Product Map.")
+        return {"ok": False, "reason": "sku_not_mapped"}
+
+    current = frappe.db.get_value("Item", item_code, image_field)
+    if current == image_url:
+        logger.info(f"receive_image_update: [{sku}] image already current — no update needed.")
+        return {"ok": True, "result": "already_current"}
+
+    frappe.db.set_value("Item", item_code, image_field, image_url, update_modified=False)
+    frappe.db.commit()
+    logger.info(f"receive_image_update: [{sku}] image updated → {image_url}")
+    return {"ok": True, "item_code": item_code}
+
+
 def sync_images():
     """
     Main image sync logic. For all items with a Magento product map,

@@ -54,6 +54,60 @@ def run_order_sync_now():
     return result
 
 
+@frappe.whitelist()
+def receive_order(order_payload):
+    """
+    Push endpoint: the Magento Kitabu_ErpNextConnector module calls this
+    immediately when a new order is placed, passing the Magento REST order
+    object as JSON.  Processes the order synchronously and returns a result.
+    """
+    import json
+
+    logger = frappe.logger("connector")
+
+    if not _is_sync_enabled():
+        logger.info("receive_order: skipped — sync is disabled.")
+        return {"ok": False, "reason": "sync_disabled"}
+
+    order = json.loads(order_payload) if isinstance(order_payload, str) else order_payload
+    if not isinstance(order, dict):
+        return {"ok": False, "reason": "invalid_payload"}
+
+    increment_id = order.get("increment_id", "?")
+    logger.info(f"receive_order: processing pushed order #{increment_id}")
+
+    try:
+        result = _process_order(order, client=None)
+        frappe.db.commit()
+        logger.info(f"receive_order: order #{increment_id} processed. result={result}")
+        return {"ok": True, "result": result}
+    except Exception as exc:
+        frappe.log_error(frappe.get_traceback(), f"receive_order: failed for order #{increment_id}")
+        return {"ok": False, "reason": str(exc)}
+
+
+@frappe.whitelist()
+def receive_order_status(entity_id, status):
+    """
+    Push endpoint: the Magento Kitabu_ErpNextConnector module calls this when
+    an existing order's status changes in Magento.
+    """
+    logger = frappe.logger("connector")
+
+    if not _is_sync_enabled():
+        logger.info("receive_order_status: skipped — sync is disabled.")
+        return {"ok": False, "reason": "sync_disabled"}
+
+    try:
+        _sync_status_from_magento(int(entity_id), str(status))
+        frappe.db.commit()
+        logger.info(f"receive_order_status: synced entity_id={entity_id} status={status}")
+        return {"ok": True}
+    except Exception as exc:
+        frappe.log_error(frappe.get_traceback(), f"receive_order_status: failed entity_id={entity_id}")
+        return {"ok": False, "reason": str(exc)}
+
+
 def sync_orders():
     """
     Main scheduled entry point.
