@@ -6,9 +6,24 @@ class MagentoOrderMap(Document):
     pass
 
 
-def is_order_imported(magento_order_id):
-    """Return True if this Magento order has already been imported."""
-    return frappe.db.exists("Magento Order Map", {"magento_order_id": magento_order_id})
+def is_order_imported(magento_order_id, magento_increment_id=None):
+    """
+    Return True if this Magento order has already been imported.
+
+    Checks by entity_id first (primary key).  Falls back to increment_id so
+    that orders which were imported before entity_id was reliably populated are
+    still detected, and to handle race conditions where the same order arrives
+    twice via different paths.
+    """
+    if magento_order_id:
+        if frappe.db.exists("Magento Order Map", {"magento_order_id": int(magento_order_id)}):
+            return True
+
+    if magento_increment_id:
+        if frappe.db.exists("Magento Order Map", {"magento_increment_id": str(magento_increment_id)}):
+            return True
+
+    return False
 
 
 def get_sales_order_for_magento_order(magento_order_id):

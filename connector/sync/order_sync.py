@@ -238,12 +238,33 @@ def _process_order(order, client):
     Raises RuntimeError on unrecoverable error so the caller can log it.
     `client` may be None when called from the push endpoint (receive_order).
     """
-    magento_order_id = order.get("entity_id")
+    raw_entity_id        = order.get("entity_id")
+    magento_order_id     = int(raw_entity_id) if raw_entity_id else None
     magento_increment_id = order.get("increment_id")
-    magento_status = order.get("status", "")
-    logger = frappe.logger("connector")
+    magento_status       = order.get("status", "")
+    logger               = frappe.logger("connector")
 
-    if is_order_imported(magento_order_id):
+    # Guard: entity_id is only populated after the Magento order is written to
+    # the DB.  The old sales_order_place_after event fired before the save, so
+    # payloads from the retry queue may still carry entity_id=null.  Fail fast
+    # with a clear message so the Magento retry queue knows to try again.
+    if not magento_order_id:
+        # Before failing, check if we already imported this increment_id so we
+        # do not raise on a legitimate duplicate-push that had no entity_id.
+        if magento_increment_id and is_order_imported(None, magento_increment_id):
+            so_name = frappe.db.get_value(
+                "Magento Order Map",
+                {"magento_increment_id": str(magento_increment_id)},
+                "sales_order",
+            )
+            return {"status": "updated", "sales_order": so_name}
+        raise RuntimeError(
+            f"Order #{magento_increment_id}: entity_id is null — order not yet committed "
+            "to Magento DB. The Magento extension must be updated to push on "
+            "sales_order_save_after instead of sales_order_place_after."
+        )
+
+    if is_order_imported(magento_order_id, magento_increment_id):
         _sync_status_from_magento(magento_order_id, magento_status)
         so_name = get_sales_order_for_magento_order(magento_order_id)
         return {"status": "updated", "sales_order": so_name}
