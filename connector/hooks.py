@@ -48,8 +48,22 @@ doc_events = {
         ],
     },
     "Sales Order": {
+        # on_submit → Magento "processing" (order confirmed in ERP)
         "on_submit": "connector.sync.status_sync.on_sales_order_submit",
+        # on_cancel → cancel the Magento order
         "on_cancel": "connector.sync.status_sync.on_sales_order_cancel",
+    },
+    # Delivery Note submitted → create Magento shipment
+    # Delivery Note cancelled → add informational comment to Magento order
+    "Delivery Note": {
+        "on_submit": "connector.sync.status_sync.on_delivery_note_submit",
+        "on_cancel": "connector.sync.status_sync.on_delivery_note_cancel",
+    },
+    # Sales Invoice submitted → create Magento invoice
+    # Sales Invoice cancelled → add informational comment to Magento order
+    "Sales Invoice": {
+        "on_submit": "connector.sync.status_sync.on_sales_invoice_submit",
+        "on_cancel": "connector.sync.status_sync.on_sales_invoice_cancel",
     },
 }
 

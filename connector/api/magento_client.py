@@ -310,6 +310,42 @@ class MagentoClient:
         """POST /V1/orders/{id}/cancel"""
         return self.post(f"/orders/{order_id}/cancel")
 
+    def get_order(self, order_id):
+        """GET /V1/orders/{id} — returns full order dict including items."""
+        return self.get(f"/orders/{order_id}")
+
+    def create_shipment(self, order_id, items, tracks=None, notify=True):
+        """
+        POST /V1/order/{orderId}/ship — create a Magento shipment.
+
+        items  : [{"order_item_id": int, "qty": float}, ...]
+        tracks : [{"track_number": str, "title": str, "carrier_code": str}, ...]
+        Returns the new Magento shipment_id (int) on success.
+
+        Note: uses /order/ (singular) not /orders/ — this is the Magento fulfillment path.
+        """
+        body = {"items": items, "notify": 1 if notify else 0}
+        if tracks:
+            body["tracks"] = tracks
+        return self.post(f"/order/{order_id}/ship", data=body)
+
+    def create_invoice(self, order_id, items, capture=False, notify=False):
+        """
+        POST /V1/order/{orderId}/invoice — create a Magento invoice.
+
+        items   : [{"order_item_id": int, "qty": float}, ...]
+        capture : set True to capture payment online.
+        Returns the new Magento invoice_id (int) on success.
+        """
+        return self.post(
+            f"/order/{order_id}/invoice",
+            data={
+                "items": items,
+                "capture": capture,
+                "notify": 1 if notify else 0,
+            },
+        )
+
     # ------------------------------------------------------------------
     # Customers
     # ------------------------------------------------------------------
