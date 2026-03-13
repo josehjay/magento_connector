@@ -207,6 +207,37 @@
                 });
             }, __("Orders"));
 
+            // ── Status Sync group ────────────────────────────────────────
+            frm.add_custom_button(__("Test Status Sync"), function () {
+                frappe.prompt(
+                    [
+                        {
+                            fieldtype: "Link",
+                            fieldname: "sales_order",
+                            label: __("Sales Order"),
+                            options: "Sales Order",
+                            reqd: 1,
+                            description: __(
+                                "Enter a Magento-imported Sales Order name. " +
+                                "This will immediately push 'processing' status to Magento " +
+                                "and show you the exact result (or error)."
+                            ),
+                        },
+                    ],
+                    function (values) {
+                        frappe.call({
+                            doc: frm.doc,
+                            method: "test_status_sync",
+                            args: { sales_order: values.sales_order },
+                            freeze: true,
+                            freeze_message: __("Pushing status to Magento…"),
+                        });
+                    },
+                    __("Test Status Sync"),
+                    __("Run Test")
+                );
+            }, __("Status"));
+
             // ── Maintenance group ────────────────────────────────────────
             frm.add_custom_button(__("Purge Old Logs (30d)"), function () {
                 frappe.confirm(

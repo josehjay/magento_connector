@@ -519,6 +519,139 @@ class MagentoSettings(Document):
         return report
 
     @frappe.whitelist()
+    def test_status_sync(self, sales_order):
+        """
+        Synchronously push a 'processing' status + comment to Magento for the
+        given Sales Order.  Runs in the foreground so the user sees the result
+        (or exact error) immediately — useful for diagnosing why background
+        status-sync jobs are not updating Magento.
+        """
+        from connector.api.magento_client import MagentoClient, MagentoAPIError
+
+        if not sales_order:
+            frappe.throw("Please provide a Sales Order name.", title="Missing Input")
+
+        # ── 1. Load the SO and verify it came from Magento ────────────────────
+        try:
+            so = frappe.get_doc("Sales Order", sales_order)
+        except frappe.DoesNotExistError:
+            frappe.throw(f"Sales Order '{sales_order}' not found.", title="Not Found")
+
+        magento_order_id = so.get("magento_order_id")
+        magento_increment = so.get("magento_increment_id") or ""
+
+        lines = [
+            f"=== STATUS SYNC DIAGNOSTIC FOR {sales_order} ===",
+            f"",
+            f"SO docstatus      : {so.docstatus} ({'Draft' if so.docstatus==0 else 'Submitted' if so.docstatus==1 else 'Cancelled'})",
+            f"magento_order_id  : {magento_order_id or '(not set — not a Magento order)'}",
+            f"magento_increment : {magento_increment or '(not set)'}",
+            f"magento_status    : {so.get('magento_order_status') or '(not set)'}",
+            f"",
+        ]
+
+        if not magento_order_id:
+            lines.append("⚠ This Sales Order is NOT linked to a Magento order.")
+            lines.append("  The status sync hooks only act on orders imported from Magento.")
+            lines.append("  If this order WAS from Magento, check that the custom field")
+            lines.append("  'magento_order_id' (Int) is present and populated on the SO.")
+            _show_report(lines, "Status Sync Diagnostic")
+            return
+
+        # ── 2. Test Magento API connection ────────────────────────────────────
+        lines.append("--- Step 1: Magento API Connection ---")
+        try:
+            client = MagentoClient()
+            lines.append(f"  OK — connected to {client.api_base}")
+        except Exception as exc:
+            lines.append(f"  FAILED: {exc}")
+            _show_report(lines, "Status Sync Diagnostic")
+            return
+        lines.append("")
+
+        # ── 3. Fetch current Magento order status ─────────────────────────────
+        lines.append("--- Step 2: Current Magento Order Status ---")
+        try:
+            order = client.get_order(int(magento_order_id))
+            current_status = order.get("status", "?")
+            current_state  = order.get("state", "?")
+            lines.append(f"  Magento order #{magento_increment or magento_order_id}")
+            lines.append(f"  Current status: {current_status}")
+            lines.append(f"  Current state : {current_state}")
+        except MagentoAPIError as exc:
+            lines.append(f"  API error fetching order: {exc} (HTTP {exc.status_code})")
+            if exc.status_code == 404:
+                lines.append("  ⚠ Order not found in Magento — the ID may be stale.")
+            elif exc.status_code in (401, 403):
+                lines.append("  ⚠ Permission denied — check integration token ACL (Sales resources).")
+            _show_report(lines, "Status Sync Diagnostic")
+            return
+        lines.append("")
+
+        # ── 4. Try posting a comment + status change ──────────────────────────
+        lines.append("--- Step 3: Push 'processing' Status + Comment ---")
+        test_comment = f"[ERPNext Test] Status sync diagnostic from {sales_order}."
+        try:
+            result = client.update_order_status(
+                order_id=int(magento_order_id),
+                status="processing",
+                comment=test_comment,
+                notify_customer=False,
+            )
+            lines.append(f"  update_order_status response: {result!r}")
+            lines.append("  ✓ Comment endpoint succeeded.")
+        except MagentoAPIError as exc:
+            lines.append(f"  ✗ update_order_status FAILED: {exc}")
+            lines.append(f"    HTTP {exc.status_code}")
+            lines.append(f"    Body: {exc.response_body}")
+            if exc.status_code in (401, 403):
+                lines.append("  ⚠ ACL error — the integration token needs:")
+                lines.append("    Magento_Sales::actions_edit  or  Magento_Sales::comment")
+            _show_report(lines, "Status Sync Diagnostic")
+            return
+        lines.append("")
+
+        # ── 5. Try patching the order entity directly ─────────────────────────
+        lines.append("--- Step 4: Patch Order Entity Status ---")
+        try:
+            result2 = client.update_order_entity_status(int(magento_order_id), "processing")
+            lines.append(f"  update_order_entity_status response: {result2!r}")
+            lines.append("  ✓ Entity patch succeeded.")
+        except MagentoAPIError as exc:
+            lines.append(f"  ⚠ Entity patch failed (non-fatal): {exc} (HTTP {exc.status_code})")
+            lines.append("    The comment-endpoint step above already updated the status.")
+        lines.append("")
+
+        # ── 6. Verify the status changed ─────────────────────────────────────
+        lines.append("--- Step 5: Verify New Magento Order Status ---")
+        try:
+            order_after = client.get_order(int(magento_order_id))
+            new_status = order_after.get("status", "?")
+            new_state  = order_after.get("state", "?")
+            lines.append(f"  New status: {new_status}  (was: {current_status})")
+            lines.append(f"  New state : {new_state}  (was: {current_state})")
+            if new_status == "processing":
+                lines.append("  ✓ Magento status is now 'processing'.")
+            else:
+                lines.append(f"  ⚠ Status is '{new_status}', not 'processing'.")
+                lines.append("    Magento may require a payment/invoice to transition to 'processing'.")
+                lines.append("    Check: Stores → Order Statuses in Magento admin.")
+        except Exception as exc:
+            lines.append(f"  Could not re-fetch order to verify: {exc}")
+        lines.append("")
+
+        # ── 7. Mirror into ERPNext ────────────────────────────────────────────
+        frappe.db.set_value(
+            "Sales Order", sales_order, "magento_order_status", "processing",
+            update_modified=False,
+        )
+        frappe.db.commit()
+        lines.append("--- Step 6: ERPNext Mirror ---")
+        lines.append(f"  magento_order_status on {sales_order} set to 'processing'.")
+
+        _show_report(lines, "Status Sync Diagnostic")
+
+    @frappe.whitelist()
     def trigger_order_sync_now(self):
         """Run order sync directly (synchronous) so the user can see results immediately."""
         from connector.sync.order_sync import sync_orders
@@ -549,3 +682,19 @@ class MagentoSettings(Document):
             )
         else:
             frappe.msgprint("Order sync finished.", indicator="blue")
+
+
+# ── Module-level helpers ───────────────────────────────────────────────────
+
+
+def _show_report(lines, title="Diagnostic"):
+    """Render a list of strings as a scrollable pre-formatted dialog."""
+    report = "\n".join(lines)
+    frappe.msgprint(
+        f"<pre style='white-space:pre-wrap;font-size:12px;"
+        f"max-height:550px;overflow:auto;font-family:monospace'>"
+        f"{frappe.utils.escape_html(report)}</pre>",
+        title=title,
+        wide=True,
+    )
+    return report

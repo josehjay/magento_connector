@@ -292,7 +292,8 @@ class MagentoClient:
 
     def update_order_status(self, order_id, status, comment="", notify_customer=False):
         """
-        POST /V1/orders/{id}/comments — adds a status history comment.
+        POST /V1/orders/{id}/comments — adds a status history entry.
+        The `status` field in the payload updates the order's current status label.
         """
         return self.post(
             f"/orders/{order_id}/comments",
@@ -302,6 +303,23 @@ class MagentoClient:
                     "status": status,
                     "is_customer_notified": 1 if notify_customer else 0,
                     "is_visible_on_front": 0,
+                }
+            },
+        )
+
+    def update_order_entity_status(self, order_id, status):
+        """
+        POST /V1/orders — directly patch an order entity's status field.
+        Used as a belt-and-suspenders step alongside update_order_status() to
+        ensure the Magento admin order list reflects the change immediately.
+        Requires Magento_Sales::actions_edit ACL permission.
+        """
+        return self.post(
+            "/orders",
+            data={
+                "entity": {
+                    "entity_id": int(order_id),
+                    "status": status,
                 }
             },
         )
