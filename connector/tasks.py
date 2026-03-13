@@ -43,7 +43,7 @@ def sync_inventory():
 
 
 def sync_orders():
-    """Every 10 minutes: pull new/updated Magento orders into ERPNext."""
+    """Every 4 hours: reconciliation sweep — pulls any orders missed by the real-time Magento push."""
     if not _is_magento_enabled():
         frappe.logger("connector").info("sync_orders: skipped — Magento integration disabled.")
         return

@@ -1,9 +1,13 @@
 """
 Order Sync: Magento Orders → ERPNext Sales Orders (Draft)
 
-Scheduled every 10 minutes via tasks.py.
-Pulls new and updated orders from Magento, creates/updates Draft Sales Orders.
-Also syncs Magento-side status changes back to ERPNext.
+Two paths into ERPNext:
+  1. Real-time PUSH  — the Magento Kitabu_ErpNextConnector extension calls
+     receive_order() and receive_order_status() immediately on order events.
+  2. Reconciliation PULL — sync_orders() runs every 4 hours as a safety net
+     to catch any orders that were missed by the real-time push.
+
+Both paths call _process_order(), which deduplicates via Magento Order Map.
 """
 
 import frappe
@@ -59,7 +63,8 @@ def receive_order(order_payload):
     """
     Push endpoint: the Magento Kitabu_ErpNextConnector module calls this
     immediately when a new order is placed, passing the Magento REST order
-    object as JSON.  Processes the order synchronously and returns a result.
+    object as JSON.  Processes the order synchronously and returns a result
+    dict containing the created/found Sales Order name.
     """
     import json
 
@@ -79,8 +84,16 @@ def receive_order(order_payload):
     try:
         result = _process_order(order, client=None)
         frappe.db.commit()
-        logger.info(f"receive_order: order #{increment_id} processed. result={result}")
-        return {"ok": True, "result": result}
+
+        status      = result.get("status") if isinstance(result, dict) else str(result)
+        so_name     = result.get("sales_order") if isinstance(result, dict) else None
+        customer    = result.get("customer") if isinstance(result, dict) else None
+
+        logger.info(
+            f"receive_order: order #{increment_id} → status={status}"
+            + (f", sales_order={so_name}" if so_name else "")
+        )
+        return {"ok": True, "status": status, "sales_order": so_name, "customer": customer}
     except Exception as exc:
         frappe.log_error(frappe.get_traceback(), f"receive_order: failed for order #{increment_id}")
         return {"ok": False, "reason": str(exc)}
@@ -165,9 +178,10 @@ def sync_orders():
         increment_id = order.get("increment_id", "?")
         try:
             result = _process_order(order, client)
-            if result == "imported":
+            status = result.get("status") if isinstance(result, dict) else str(result)
+            if status == "imported":
                 imported += 1
-            elif result == "updated":
+            elif status == "updated":
                 updated += 1
             else:
                 skipped += 1
@@ -220,8 +234,9 @@ def sync_orders():
 def _process_order(order, client):
     """
     Process a single Magento order.
-    Returns 'imported', 'updated', or 'skipped'.
-    Raises on unrecoverable error so the caller can log it.
+    Returns a dict: {"status": "imported"|"updated"|"skipped", "sales_order": str|None, ...}
+    Raises RuntimeError on unrecoverable error so the caller can log it.
+    `client` may be None when called from the push endpoint (receive_order).
     """
     magento_order_id = order.get("entity_id")
     magento_increment_id = order.get("increment_id")
@@ -230,7 +245,8 @@ def _process_order(order, client):
 
     if is_order_imported(magento_order_id):
         _sync_status_from_magento(magento_order_id, magento_status)
-        return "updated"
+        so_name = get_sales_order_for_magento_order(magento_order_id)
+        return {"status": "updated", "sales_order": so_name}
 
     if magento_status in ("canceled",):
         create_log(
@@ -239,7 +255,7 @@ def _process_order(order, client):
             magento_id=magento_increment_id,
             error_message=f"Skipped cancelled order #{magento_increment_id}",
         )
-        return "skipped"
+        return {"status": "skipped", "reason": "cancelled"}
 
     # ----- Customer -----
     # Always create/find the real buyer's customer record — we need it for the
@@ -284,7 +300,7 @@ def _process_order(order, client):
             magento_id=magento_increment_id,
             error_message=msg,
         )
-        return "skipped"
+        return {"status": "skipped", "reason": "no_matching_items", "skus": skipped_skus}
 
     # ----- Taxes & charges -----
     taxes = _build_taxes_and_charges(order)
@@ -375,7 +391,7 @@ def _process_order(order, client):
         magento_id=magento_increment_id,
         response_payload={"sales_order": so.name, "customer": so_customer, "buyer": real_customer_name},
     )
-    return "imported"
+    return {"status": "imported", "sales_order": so.name, "customer": so_customer, "real_customer": real_customer_name}
 
 
 def _get_default_company():

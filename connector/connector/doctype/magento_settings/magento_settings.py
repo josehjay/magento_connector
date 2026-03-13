@@ -455,6 +455,70 @@ class MagentoSettings(Document):
         return show()
 
     @frappe.whitelist()
+    def view_recent_push_log(self):
+        """
+        Show the last 30 order operations received from the Magento extension
+        and any recent failures, so the user can see what has been pushed.
+        """
+        logs = frappe.get_all(
+            "Magento Sync Log",
+            filters={"operation": "Order Pull"},
+            fields=["name", "status", "synced_on", "magento_id", "document_name", "error_message", "response_payload"],
+            order_by="synced_on desc",
+            limit=30,
+        )
+
+        lines = ["=== RECENT ORDER PUSH LOG (last 30 entries) ===\n"]
+
+        if not logs:
+            lines.append("No order log entries found.")
+        else:
+            for log in logs:
+                ts      = str(log.synced_on or "")[:19]
+                status  = log.status or "?"
+                mago_id = log.magento_id or "—"
+                so_name = log.document_name or ""
+
+                # Try to extract SO name from response payload if not in document_name
+                if not so_name and log.response_payload:
+                    try:
+                        import json
+                        payload = json.loads(log.response_payload) if isinstance(log.response_payload, str) else log.response_payload
+                        so_name = payload.get("sales_order") or payload.get("imported") or ""
+                    except Exception:
+                        pass
+
+                icon = "✓" if status == "Success" else ("✗" if status == "Failed" else "·")
+                line = f"  {icon} [{ts}]  Magento #{mago_id:<14}  Status: {status}"
+                if so_name:
+                    line += f"  →  SO: {so_name}"
+                if status != "Success" and log.error_message:
+                    err = str(log.error_message)[:120]
+                    line += f"\n       Error: {err}"
+                lines.append(line)
+
+        # Also surface any ERPNext error log entries tagged to order sync
+        recent_errors = frappe.get_all(
+            "Error Log",
+            filters={"method": ["like", "%order%"], "creation": [">", frappe.utils.add_days(frappe.utils.nowdate(), -3)]},
+            fields=["name", "method", "creation"],
+            order_by="creation desc",
+            limit=5,
+        )
+        if recent_errors:
+            lines.append("\n=== RECENT ORDER ERROR LOG ENTRIES (last 3 days) ===")
+            for err in recent_errors:
+                lines.append(f"  [{str(err.creation)[:19]}]  {err.method}  →  {err.name}")
+
+        report = "\n".join(lines)
+        frappe.msgprint(
+            f"<pre style='white-space:pre-wrap;font-size:12px;max-height:500px;overflow:auto'>{frappe.utils.escape_html(report)}</pre>",
+            title="Order Push Log",
+            wide=True,
+        )
+        return report
+
+    @frappe.whitelist()
     def trigger_order_sync_now(self):
         """Run order sync directly (synchronous) so the user can see results immediately."""
         from connector.sync.order_sync import sync_orders

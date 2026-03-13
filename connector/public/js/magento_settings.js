@@ -1,7 +1,9 @@
-// Magento Settings — Item Groups to Sync: attribute set picker and row name sync.
+// Magento Settings — Item Groups attribute set picker + action buttons
 
 (function () {
     "use strict";
+
+    // ── Attribute Set helpers ──────────────────────────────────────────────
 
     function get_attribute_set_name(items, attributeSetId) {
         if (!items || !attributeSetId) return "";
@@ -101,8 +103,11 @@
         });
     }
 
+    // ── Main form handler ─────────────────────────────────────────────────
+
     frappe.ui.form.on("Magento Settings", {
         refresh: function (frm) {
+
             // Pre-load attribute sets so names are backfilled immediately
             if (frm.fields_dict.magento_item_groups) {
                 frappe.call({
@@ -116,13 +121,66 @@
                 });
             }
 
+            // ── Connection group ─────────────────────────────────────────
+            frm.add_custom_button(__("Test Connection"), function () {
+                frappe.call({
+                    doc: frm.doc,
+                    method: "test_connection",
+                    freeze: true,
+                    freeze_message: __("Testing Magento connection…"),
+                });
+            }, __("Connection"));
+
+            frm.add_custom_button(__("Diagnose Sync"), function () {
+                frappe.call({
+                    doc: frm.doc,
+                    method: "diagnose_sync",
+                    freeze: true,
+                    freeze_message: __("Running diagnostics — checking all prerequisites…"),
+                });
+            }, __("Connection"));
+
+            // ── Products group ───────────────────────────────────────────
             frm.add_custom_button(__("Pick Attribute Set"), function () {
                 open_pick_attribute_set_dialog(frm);
-            }, __("Actions"));
+            }, __("Products"));
+
+            frm.add_custom_button(__("Sync All Products Now"), function () {
+                frappe.confirm(__("Queue a full product sync? This runs in the background."), function () {
+                    frappe.call({
+                        doc: frm.doc,
+                        method: "trigger_full_product_sync",
+                        callback: function () {
+                            frappe.show_alert({ message: __("Full product sync queued."), indicator: "blue" });
+                        },
+                    });
+                });
+            }, __("Products"));
+
+            frm.add_custom_button(__("Sync Images Now"), function () {
+                frappe.call({
+                    doc: frm.doc,
+                    method: "trigger_image_sync",
+                    freeze: true,
+                    freeze_message: __("Running image sync — may take a few minutes…"),
+                });
+            }, __("Products"));
+
+            // ── Orders group ─────────────────────────────────────────────
+            // "Pull Orders from Magento" is now a 4-hour safety-net reconciliation sweep.
+            // Real-time order creation is handled by the Magento Kitabu_ErpNextConnector push module.
+            frm.add_custom_button(__("Pull Orders from Magento"), function () {
+                frappe.call({
+                    doc: frm.doc,
+                    method: "trigger_order_sync_now",
+                    freeze: true,
+                    freeze_message: __("Reconciling orders with Magento — this is a safety-net sweep…"),
+                });
+            }, __("Orders"));
 
             frm.add_custom_button(__("Reset Order Sync Cursor"), function () {
                 frappe.confirm(
-                    __("This will clear the Last Order Sync Time so the next sync fetches orders from the last 90 days. Continue?"),
+                    __("This will clear the Last Order Sync Time so the next pull fetches orders from the last 90 days. Continue?"),
                     function () {
                         frappe.call({
                             doc: frm.doc,
@@ -131,7 +189,7 @@
                         });
                     }
                 );
-            }, __("Actions"));
+            }, __("Orders"));
 
             frm.add_custom_button(__("Test Order Import"), function () {
                 frappe.call({
@@ -140,8 +198,16 @@
                     freeze: true,
                     freeze_message: __("Tracing order import chain — no records will be created…"),
                 });
-            }, __("Actions"));
+            }, __("Orders"));
 
+            frm.add_custom_button(__("View Recent Order Log"), function () {
+                frappe.call({
+                    doc: frm.doc,
+                    method: "view_recent_push_log",
+                });
+            }, __("Orders"));
+
+            // ── Maintenance group ────────────────────────────────────────
             frm.add_custom_button(__("Purge Old Logs (30d)"), function () {
                 frappe.confirm(
                     __("Delete all Magento Sync Log entries older than 30 days?"),
@@ -153,65 +219,7 @@
                         });
                     }
                 );
-            }, __("Actions"));
-
-            frm.add_custom_button(__("Diagnose Sync"), function () {
-                frappe.call({
-                    doc: frm.doc,
-                    method: "diagnose_sync",
-                    freeze: true,
-                    freeze_message: __("Running sync diagnostics — checking all prerequisites…"),
-                });
-            }, __("Actions"));
-
-            frm.add_custom_button(__("Test Connection"), function () {
-                frappe.call({
-                    doc: frm.doc,
-                    method: "test_connection",
-                    freeze: true,
-                    freeze_message: __("Testing Magento connection…"),
-                });
-            }, __("Actions"));
-
-            frm.add_custom_button(__("Sync All Products Now"), function () {
-                frappe.confirm(__("This will queue a full product sync. Continue?"), function () {
-                    frappe.call({
-                        doc: frm.doc,
-                        method: "trigger_full_product_sync",
-                        callback: function () {
-                            frappe.show_alert({ message: __("Full product sync queued."), indicator: "blue" });
-                        },
-                    });
-                });
-            }, __("Actions"));
-
-            frm.add_custom_button(__("Sync Orders Now (Background)"), function () {
-                frappe.call({
-                    doc: frm.doc,
-                    method: "trigger_order_sync",
-                    callback: function () {
-                        frappe.show_alert({ message: __("Order sync queued."), indicator: "blue" });
-                    },
-                });
-            }, __("Actions"));
-
-            frm.add_custom_button(__("Sync Images Now"), function () {
-                frappe.call({
-                    doc: frm.doc,
-                    method: "trigger_image_sync",
-                    freeze: true,
-                    freeze_message: __("Running image sync — this may take a few minutes…"),
-                });
-            }, __("Actions"));
-
-            frm.add_custom_button(__("Sync Orders Now"), function () {
-                frappe.call({
-                    doc: frm.doc,
-                    method: "trigger_order_sync_now",
-                    freeze: true,
-                    freeze_message: __("Pulling orders from Magento…"),
-                });
-            }, __("Actions"));
+            }, __("Maintenance"));
         },
     });
 })();
