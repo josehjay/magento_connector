@@ -273,9 +273,13 @@ def _process_order(order, client):
     so_customer = default_customer if default_customer else real_customer_name
 
     # ----- Address -----
+    # When billing to a default customer (e.g. "Web Sales"), the address must
+    # also be linked to that customer to pass ERPNext's party-address validation.
     address_name = None
     try:
-        address_name = get_or_create_address(order, real_customer_name)
+        address_name = get_or_create_address(
+            order, real_customer_name, also_link_to=so_customer
+        )
     except Exception as e:
         # Address is not mandatory — log and continue
         logger.warning(f"Order #{magento_increment_id}: address creation failed (continuing): {e}")

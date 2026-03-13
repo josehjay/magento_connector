@@ -93,10 +93,41 @@ def get_or_create_customer(magento_order):
     return customer.name
 
 
-def get_or_create_address(magento_order, customer_name):
+def _ensure_address_linked_to_customer(address_name, customer_name):
+    """
+    Add a Dynamic Link from `address_name` → `customer_name` if one does not
+    already exist.  Called when the billing customer on the SO (e.g. "Web Sales")
+    differs from the real buyer whose name the address was originally created under.
+    ERPNext's validate_party_address requires the address to have a link to the SO
+    customer, so we add one here without disturbing the original buyer link.
+    """
+    try:
+        addr = frappe.get_doc("Address", address_name)
+        existing_links = {
+            lnk.link_name
+            for lnk in (addr.get("links") or [])
+            if lnk.link_doctype == "Customer"
+        }
+        if customer_name not in existing_links:
+            addr.append("links", {"link_doctype": "Customer", "link_name": customer_name})
+            addr.flags.ignore_permissions = True
+            addr.save()
+            frappe.db.commit()
+    except Exception as e:
+        frappe.logger("connector").warning(
+            f"_ensure_address_linked_to_customer: could not link address "
+            f"{address_name} to customer {customer_name}: {e}"
+        )
+
+
+def get_or_create_address(magento_order, customer_name, also_link_to=None):
     """
     Create or update the shipping address for a customer.
     Returns the ERPNext Address name, or None if address data is missing.
+
+    `also_link_to` — if the Sales Order bills to a different customer (e.g.
+    "Web Sales"), pass that name here so the address is linked to both parties.
+    ERPNext validates that the shipping address belongs to the SO customer.
     """
     shipping_address = None
     ext = magento_order.get("extension_attributes") or {}
@@ -158,6 +189,8 @@ def get_or_create_address(magento_order, customer_name):
             frappe.logger("connector").warning(
                 f"get_or_create_address: could not update existing address {existing_addr}: {e}"
             )
+        if also_link_to and also_link_to != customer_name:
+            _ensure_address_linked_to_customer(existing_addr, also_link_to)
         return existing_addr
 
     # Create new address
@@ -175,6 +208,13 @@ def get_or_create_address(magento_order, customer_name):
         "link_doctype": "Customer",
         "link_name": customer_name,
     })
+    # When billing to a default customer (e.g. "Web Sales"), also link the
+    # address to that customer so ERPNext's party-address validation passes.
+    if also_link_to and also_link_to != customer_name:
+        addr.append("links", {
+            "link_doctype": "Customer",
+            "link_name": also_link_to,
+        })
     addr.flags.ignore_permissions = True
     addr.insert()
     frappe.db.commit()
