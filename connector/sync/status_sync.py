@@ -242,7 +242,9 @@ def _push_processing_comment(sales_order, magento_order_id, comment):
     try:
         client = MagentoClient()
 
-        # ── Step 1: add comment + set status via the status-history endpoint ──
+        # update_order_status does a two-step internally:
+        #   1. POST /V1/orders  — entity patch to force state+status transition
+        #   2. POST /V1/orders/{id}/comments — add the history comment
         result = client.update_order_status(
             order_id=magento_order_id,
             status="processing",
@@ -250,29 +252,11 @@ def _push_processing_comment(sales_order, magento_order_id, comment):
             notify_customer=False,
         )
         logger.info(
-            f"_push_processing_comment: comments endpoint returned {result!r} "
-            f"for Magento order {magento_order_id}"
+            f"_push_processing_comment: Magento API success for order "
+            f"{magento_order_id} — comment result={result!r}"
         )
 
-        # ── Step 2: also patch the order entity to ensure state/status change ──
-        # The comments endpoint sets the status label; patching the entity
-        # ensures the underlying state is also updated and the change is visible
-        # in the Magento admin order list.
-        try:
-            client.update_order_entity_status(magento_order_id, "processing")
-            logger.info(
-                f"_push_processing_comment: entity patch succeeded for "
-                f"Magento order {magento_order_id}"
-            )
-        except MagentoAPIError as patch_err:
-            # Non-fatal: the comment was already posted successfully.
-            # The entity patch is best-effort.
-            logger.warning(
-                f"_push_processing_comment: entity patch failed (non-fatal) for "
-                f"Magento order {magento_order_id}: {patch_err}"
-            )
-
-        # ── Step 3: mirror into ERPNext ───────────────────────────────────────
+        # ── Mirror into ERPNext ───────────────────────────────────────────────
         frappe.db.set_value(
             "Sales Order", sales_order, "magento_order_status", "processing",
             update_modified=False,

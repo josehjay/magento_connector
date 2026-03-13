@@ -588,38 +588,49 @@ class MagentoSettings(Document):
             return
         lines.append("")
 
-        # ── 4. Try posting a comment + status change ──────────────────────────
-        lines.append("--- Step 3: Push 'processing' Status + Comment ---")
-        test_comment = f"[ERPNext Test] Status sync diagnostic from {sales_order}."
+        # ── 4. Step 1 of the real sync: entity patch ──────────────────────────
+        lines.append("--- Step 3a: Entity Patch (POST /V1/orders) ---")
+        lines.append("  (Forces state+status transition — bypasses status-history validation)")
+        entity_patched = False
         try:
-            result = client.update_order_status(
-                order_id=int(magento_order_id),
-                status="processing",
-                comment=test_comment,
-                notify_customer=False,
-            )
-            lines.append(f"  update_order_status response: {result!r}")
-            lines.append("  ✓ Comment endpoint succeeded.")
+            result_patch = client.update_order_entity_status(int(magento_order_id), "processing")
+            lines.append(f"  ✓ Entity patch succeeded. Response: {result_patch!r}")
+            entity_patched = True
         except MagentoAPIError as exc:
-            lines.append(f"  ✗ update_order_status FAILED: {exc}")
-            lines.append(f"    HTTP {exc.status_code}")
-            lines.append(f"    Body: {exc.response_body}")
+            lines.append(f"  ✗ Entity patch FAILED: {exc}")
+            lines.append(f"    HTTP {exc.status_code}  Body: {exc.response_body}")
             if exc.status_code in (401, 403):
-                lines.append("  ⚠ ACL error — the integration token needs:")
-                lines.append("    Magento_Sales::actions_edit  or  Magento_Sales::comment")
-            _show_report(lines, "Status Sync Diagnostic")
-            return
+                lines.append("  ⚠ ACL required: Magento_Sales::actions_edit")
+                lines.append("    Go to: Magento Admin → System → Integrations → (your token) → API")
+                lines.append("    Enable: Sales → Operations → Orders → Actions")
+            lines.append("  The comment step below will still run (informational, no status label).")
         lines.append("")
 
-        # ── 5. Try patching the order entity directly ─────────────────────────
-        lines.append("--- Step 4: Patch Order Entity Status ---")
+        # ── 5. Step 2 of the real sync: comment ───────────────────────────────
+        lines.append("--- Step 3b: Status Comment (POST /V1/orders/{id}/comments) ---")
+        test_comment = f"[ERPNext Test] Status sync diagnostic from {sales_order}."
+        comment_body: dict = {
+            "comment": test_comment,
+            "is_customer_notified": 0,
+            "is_visible_on_front": 0,
+        }
+        if entity_patched:
+            comment_body["status"] = "processing"
+            lines.append("  Posting comment WITH status='processing' (entity was patched).")
+        else:
+            lines.append("  Posting informational comment WITHOUT status change (entity patch failed).")
         try:
-            result2 = client.update_order_entity_status(int(magento_order_id), "processing")
-            lines.append(f"  update_order_entity_status response: {result2!r}")
-            lines.append("  ✓ Entity patch succeeded.")
+            from connector.api.magento_client import MagentoAPIError as _MAE
+            result_comment = client.post(
+                f"/orders/{int(magento_order_id)}/comments",
+                data={"statusHistory": comment_body},
+            )
+            lines.append(f"  ✓ Comment posted. Response: {result_comment!r}")
         except MagentoAPIError as exc:
-            lines.append(f"  ⚠ Entity patch failed (non-fatal): {exc} (HTTP {exc.status_code})")
-            lines.append("    The comment-endpoint step above already updated the status.")
+            lines.append(f"  ✗ Comment FAILED: {exc}")
+            lines.append(f"    HTTP {exc.status_code}  Body: {exc.response_body}")
+            _show_report(lines, "Status Sync Diagnostic")
+            return
         lines.append("")
 
         # ── 6. Verify the status changed ─────────────────────────────────────

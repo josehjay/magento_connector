@@ -292,26 +292,68 @@ class MagentoClient:
 
     def update_order_status(self, order_id, status, comment="", notify_customer=False):
         """
-        POST /V1/orders/{id}/comments — adds a status history entry.
-        The `status` field in the payload updates the order's current status label.
+        Change the Magento order status and record an informational comment.
+
+        Two-step approach (required because the comments endpoint validates
+        that the target status is already in the order's status history):
+
+          Step 1 — POST /V1/orders to patch the order entity's state + status.
+                   This forces the transition (e.g. new/pending → processing)
+                   without going through Magento's invoice/shipment workflow.
+                   Requires Magento_Sales::actions_edit ACL.
+
+          Step 2 — POST /V1/orders/{id}/comments to add a history entry.
+                   The status field is included ONLY if step 1 succeeded;
+                   otherwise the comment is informational (no status label),
+                   which avoids the "status not in history" 400 error.
         """
+        logger = frappe.logger("connector")
+
+        # ── Step 1: force state + status transition ────────────────────────
+        entity_patched = False
+        try:
+            self.post(
+                "/orders",
+                data={
+                    "entity": {
+                        "entity_id": int(order_id),
+                        "state":  status,
+                        "status": status,
+                    }
+                },
+            )
+            entity_patched = True
+            logger.info(
+                f"update_order_status: entity patch succeeded for "
+                f"order {order_id} → state/status={status}"
+            )
+        except MagentoAPIError as exc:
+            logger.warning(
+                f"update_order_status: entity patch failed for order {order_id} "
+                f"(HTTP {exc.status_code}): {exc}. "
+                f"Will post informational comment without status change."
+            )
+
+        # ── Step 2: add history comment ────────────────────────────────────
+        comment_body: dict = {
+            "comment":               comment,
+            "is_customer_notified":  1 if notify_customer else 0,
+            "is_visible_on_front":   0,
+        }
+        # Only include status label when we know the entity is already in that status;
+        # otherwise Magento rejects the comment with a 400.
+        if entity_patched:
+            comment_body["status"] = status
+
         return self.post(
             f"/orders/{order_id}/comments",
-            data={
-                "statusHistory": {
-                    "comment": comment,
-                    "status": status,
-                    "is_customer_notified": 1 if notify_customer else 0,
-                    "is_visible_on_front": 0,
-                }
-            },
+            data={"statusHistory": comment_body},
         )
 
     def update_order_entity_status(self, order_id, status):
         """
-        POST /V1/orders — directly patch an order entity's status field.
-        Used as a belt-and-suspenders step alongside update_order_status() to
-        ensure the Magento admin order list reflects the change immediately.
+        POST /V1/orders — directly patch an order entity's state and status.
+        Low-level helper used by the diagnostic test tool.
         Requires Magento_Sales::actions_edit ACL permission.
         """
         return self.post(
@@ -319,6 +361,7 @@ class MagentoClient:
             data={
                 "entity": {
                     "entity_id": int(order_id),
+                    "state":  status,
                     "status": status,
                 }
             },
