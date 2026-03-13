@@ -103,4 +103,5 @@ doctype_js = {
     "Magento Settings":   "public/js/magento_settings.js",
     "Item":               "public/js/item.js",
     "Sales Order":        "public/js/sales_order.js",
+    "Sales Invoice":      "public/js/sales_invoice.js",
 }
