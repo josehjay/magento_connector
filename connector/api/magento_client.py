@@ -294,76 +294,80 @@ class MagentoClient:
         """
         Change the Magento order status and record an informational comment.
 
-        Two-step approach (required because the comments endpoint validates
-        that the target status is already in the order's status history):
+        Primary path — custom Kitabu_ErpNextConnector endpoint:
+          POST /V1/erpnext/order/{id}/status
+          Uses Magento's internal OrderRepository to set state + status and
+          append a history comment in one atomic operation.  This bypasses
+          the standard comments-endpoint validation that requires the target
+          status to already be in the order's history.
+          ACL: Kitabu_ErpNextConnector::order_status
 
-          Step 1 — POST /V1/orders to patch the order entity's state + status.
-                   This forces the transition (e.g. new/pending → processing)
-                   without going through Magento's invoice/shipment workflow.
-                   Requires Magento_Sales::actions_edit ACL.
-
-          Step 2 — POST /V1/orders/{id}/comments to add a history entry.
-                   The status field is included ONLY if step 1 succeeded;
-                   otherwise the comment is informational (no status label),
-                   which avoids the "status not in history" 400 error.
+        Fallback — standard comments endpoint (informational comment only):
+          POST /V1/orders/{id}/comments  (no status change)
+          Used when the custom endpoint is unavailable (e.g. module not yet deployed).
         """
         logger = frappe.logger("connector")
 
-        # ── Step 1: force state + status transition ────────────────────────
-        entity_patched = False
+        # ── Primary: custom endpoint ───────────────────────────────────────
         try:
-            self.post(
-                "/orders",
+            result = self.post(
+                f"/erpnext/order/{int(order_id)}/status",
                 data={
-                    "entity": {
-                        "entity_id": int(order_id),
-                        "state":  status,
-                        "status": status,
-                    }
+                    "status":         status,
+                    "comment":        comment,
+                    "notifyCustomer": False,
                 },
             )
-            entity_patched = True
             logger.info(
-                f"update_order_status: entity patch succeeded for "
-                f"order {order_id} → state/status={status}"
+                f"update_order_status: custom endpoint succeeded for "
+                f"order {order_id} → {status}"
             )
+            return result
         except MagentoAPIError as exc:
-            logger.warning(
-                f"update_order_status: entity patch failed for order {order_id} "
-                f"(HTTP {exc.status_code}): {exc}. "
-                f"Will post informational comment without status change."
-            )
+            if exc.status_code == 404:
+                logger.warning(
+                    f"update_order_status: custom endpoint not found (HTTP 404) for "
+                    f"order {order_id}. Is the Kitabu_ErpNextConnector Magento module "
+                    f"deployed and the 'order_status' ACL resource granted to the "
+                    f"integration token? Falling back to informational comment."
+                )
+            else:
+                logger.warning(
+                    f"update_order_status: custom endpoint failed for order {order_id} "
+                    f"(HTTP {exc.status_code}): {exc}. "
+                    f"Falling back to informational comment."
+                )
 
-        # ── Step 2: add history comment ────────────────────────────────────
-        comment_body: dict = {
-            "comment":               comment,
-            "is_customer_notified":  1 if notify_customer else 0,
-            "is_visible_on_front":   0,
-        }
-        # Only include status label when we know the entity is already in that status;
-        # otherwise Magento rejects the comment with a 400.
-        if entity_patched:
-            comment_body["status"] = status
-
+        # ── Fallback: standard comments endpoint (no status change) ────────
+        logger.info(
+            f"update_order_status: posting informational comment (no status change) "
+            f"for order {order_id}"
+        )
         return self.post(
-            f"/orders/{order_id}/comments",
-            data={"statusHistory": comment_body},
+            f"/orders/{int(order_id)}/comments",
+            data={
+                "statusHistory": {
+                    "comment":              comment,
+                    "is_customer_notified": 1 if notify_customer else 0,
+                    "is_visible_on_front":  0,
+                    # Deliberately omitting "status" — the standard endpoint
+                    # rejects any status not already in the order's history.
+                }
+            },
         )
 
     def update_order_entity_status(self, order_id, status):
         """
-        POST /V1/orders — directly patch an order entity's state and status.
-        Low-level helper used by the diagnostic test tool.
-        Requires Magento_Sales::actions_edit ACL permission.
+        Directly set a Magento order's state + status via the custom
+        Kitabu_ErpNextConnector REST endpoint.
+        Used by the diagnostic test tool in Magento Settings.
         """
         return self.post(
-            "/orders",
+            f"/erpnext/order/{int(order_id)}/status",
             data={
-                "entity": {
-                    "entity_id": int(order_id),
-                    "state":  status,
-                    "status": status,
-                }
+                "status":         status,
+                "comment":        "",
+                "notifyCustomer": False,
             },
         )
 
