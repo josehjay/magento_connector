@@ -588,8 +588,22 @@ class MagentoSettings(Document):
             return
         lines.append("")
 
-        # ── 4. Step 1 of the real sync: entity patch ──────────────────────────
-        lines.append("--- Step 3a: Entity Patch (POST /V1/orders) ---")
+        # ── 4. Attempt invoice first (required by many Magento workflows) ────
+        lines.append("--- Step 3: Invoice Attempt (POST /V1/order/{id}/invoice) ---")
+        invoice_created = False
+        try:
+            invoice_result = client.ensure_invoice_for_processing(int(magento_order_id), notify=False)
+            if invoice_result is not None:
+                lines.append(f"  ✓ Invoice created. Response: {invoice_result!r}")
+                invoice_created = True
+            else:
+                lines.append("  ℹ No invoice created (already invoiced/processing or no invoiceable qty).")
+        except Exception as exc:
+            lines.append(f"  ✗ Invoice attempt FAILED: {exc}")
+        lines.append("")
+
+        # ── 5. Step 1 of the real sync: entity patch ──────────────────────────
+        lines.append("--- Step 4a: Entity Patch (POST /V1/orders) ---")
         lines.append("  (Forces state+status transition — bypasses status-history validation)")
         entity_patched = False
         try:
@@ -606,8 +620,8 @@ class MagentoSettings(Document):
             lines.append("  The comment step below will still run (informational, no status label).")
         lines.append("")
 
-        # ── 5. Step 2 of the real sync: comment ───────────────────────────────
-        lines.append("--- Step 3b: Status Comment (POST /V1/orders/{id}/comments) ---")
+        # ── 6. Step 2 of the real sync: comment ───────────────────────────────
+        lines.append("--- Step 4b: Status Comment (POST /V1/orders/{id}/comments) ---")
         test_comment = f"[ERPNext Test] Status sync diagnostic from {sales_order}."
         comment_body: dict = {
             "comment": test_comment,
@@ -620,7 +634,6 @@ class MagentoSettings(Document):
         else:
             lines.append("  Posting informational comment WITHOUT status change (entity patch failed).")
         try:
-            from connector.api.magento_client import MagentoAPIError as _MAE
             result_comment = client.post(
                 f"/orders/{int(magento_order_id)}/comments",
                 data={"statusHistory": comment_body},
@@ -633,7 +646,7 @@ class MagentoSettings(Document):
             return
         lines.append("")
 
-        # ── 6. Verify the status changed ─────────────────────────────────────
+        # ── 7. Verify the status changed ─────────────────────────────────────
         lines.append("--- Step 5: Verify New Magento Order Status ---")
         try:
             order_after = client.get_order(int(magento_order_id))
@@ -645,6 +658,8 @@ class MagentoSettings(Document):
                 lines.append("  ✓ Magento status is now 'processing'.")
             else:
                 lines.append(f"  ⚠ Status is '{new_status}', not 'processing'.")
+                if not invoice_created:
+                    lines.append("    Invoice was not created in Step 3; this is often required.")
                 lines.append("    Magento may require a payment/invoice to transition to 'processing'.")
                 lines.append("    Check: Stores → Order Statuses in Magento admin.")
         except Exception as exc:

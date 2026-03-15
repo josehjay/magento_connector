@@ -308,6 +308,11 @@ class MagentoClient:
         """
         logger = frappe.logger("connector")
 
+        # Some Magento setups only move pending -> processing after an invoice
+        # is created. Try that first when processing is requested.
+        if status == "processing":
+            self.ensure_invoice_for_processing(order_id)
+
         # ── Primary: custom endpoint ───────────────────────────────────────
         try:
             result = self.post(
@@ -355,6 +360,105 @@ class MagentoClient:
                 }
             },
         )
+
+    def _invoiceable_items_from_order(self, order):
+        """
+        Build an invoice payload from order rows that still have qty_to_invoice > 0.
+        """
+        items = []
+        for row in (order.get("items") or []):
+            try:
+                order_item_id = int(row.get("item_id") or 0)
+            except (TypeError, ValueError):
+                order_item_id = 0
+            if not order_item_id:
+                continue
+
+            if bool(row.get("is_dummy")):
+                continue
+
+            product_type = (row.get("product_type") or "").strip().lower()
+            if product_type in ("configurable", "bundle"):
+                continue
+
+            try:
+                qty_to_invoice = float(row.get("qty_to_invoice") or 0)
+            except (TypeError, ValueError):
+                qty_to_invoice = 0.0
+
+            if qty_to_invoice <= 0:
+                continue
+
+            items.append(
+                {
+                    "order_item_id": order_item_id,
+                    "qty": qty_to_invoice,
+                }
+            )
+        return items
+
+    def ensure_invoice_for_processing(self, order_id, notify=False):
+        """
+        Attempt to create a Magento invoice so pending orders can move to processing.
+        This is best-effort and never raises on business-rule failures.
+        """
+        logger = frappe.logger("connector")
+        try:
+            order = self.get_order(int(order_id))
+        except MagentoAPIError as exc:
+            logger.warning(
+                f"ensure_invoice_for_processing: cannot load order {order_id} "
+                f"(HTTP {exc.status_code}): {exc}"
+            )
+            return None
+
+        status = (order.get("status") or "").strip().lower()
+        if status in ("processing", "complete", "closed", "canceled"):
+            logger.info(
+                f"ensure_invoice_for_processing: order {order_id} already in "
+                f"terminal/processed status '{status}', skipping invoice."
+            )
+            return None
+
+        items = self._invoiceable_items_from_order(order)
+        if not items:
+            logger.info(
+                f"ensure_invoice_for_processing: no invoiceable items for order {order_id}."
+            )
+            return None
+
+        try:
+            invoice_id = self.create_invoice(
+                int(order_id),
+                items=items,
+                capture=False,
+                notify=notify,
+            )
+            logger.info(
+                f"ensure_invoice_for_processing: created invoice {invoice_id!r} "
+                f"for order {order_id}."
+            )
+            return invoice_id
+        except MagentoAPIError as exc:
+            body = (exc.response_body or "").lower()
+            expected_business_failures = (
+                "does not allow an invoice",
+                "can not be invoiced",
+                "cannot create an invoice",
+                "the invoice can't be created",
+                "the order does not allow",
+            )
+            if any(msg in body for msg in expected_business_failures):
+                logger.info(
+                    f"ensure_invoice_for_processing: invoice not created for order "
+                    f"{order_id} due to business rule: {exc}"
+                )
+                return None
+            logger.warning(
+                f"ensure_invoice_for_processing: invoice API failed for order "
+                f"{order_id} (HTTP {exc.status_code}): {exc}"
+            )
+            return None
 
     def update_order_entity_status(self, order_id, status):
         """

@@ -114,6 +114,75 @@ class TestMagentoClient(unittest.TestCase):
         self.assertIn("searchCriteria[filterGroups][0][filters][0][value]", params)
         self.assertEqual(params["searchCriteria[filterGroups][0][filters][0][value]"], "2024-01-01 00:00:00")
 
+    @patch("connector.api.magento_client.frappe")
+    @patch("connector.api.magento_client.requests.Session")
+    def test_processing_status_attempts_invoice_first(self, mock_session_cls, mock_frappe):
+        """update_order_status('processing') should trigger invoice attempt first."""
+        mock_frappe.get_single.return_value = self._make_settings()
+        mock_frappe.logger.return_value = MagicMock()
+        mock_session_cls.return_value = MagicMock()
+
+        from connector.api.magento_client import MagentoClient
+        client = MagentoClient()
+        client.ensure_invoice_for_processing = MagicMock(return_value=1234)
+        client.post = MagicMock(return_value={"ok": True})
+
+        client.update_order_status(order_id=7, status="processing", comment="test")
+
+        client.ensure_invoice_for_processing.assert_called_once_with(7)
+
+    @patch("connector.api.magento_client.frappe")
+    @patch("connector.api.magento_client.requests.Session")
+    def test_invoiceable_items_only_include_positive_qty(self, mock_session_cls, mock_frappe):
+        """Invoice payload should only contain concrete rows with qty_to_invoice."""
+        mock_frappe.get_single.return_value = self._make_settings()
+        mock_session_cls.return_value = MagicMock()
+
+        from connector.api.magento_client import MagentoClient
+        client = MagentoClient()
+
+        order = {
+            "items": [
+                {"item_id": 10, "product_type": "configurable", "qty_to_invoice": 1},
+                {"item_id": 11, "product_type": "simple", "qty_to_invoice": 0},
+                {"item_id": 12, "product_type": "simple", "qty_to_invoice": 2},
+                {"item_id": 13, "product_type": "simple", "qty_to_invoice": "1.5"},
+            ]
+        }
+
+        rows = client._invoiceable_items_from_order(order)
+
+        self.assertEqual(
+            rows,
+            [
+                {"order_item_id": 12, "qty": 2.0},
+                {"order_item_id": 13, "qty": 1.5},
+            ],
+        )
+
+    @patch("connector.api.magento_client.frappe")
+    @patch("connector.api.magento_client.requests.Session")
+    def test_ensure_invoice_calls_create_invoice_when_needed(self, mock_session_cls, mock_frappe):
+        """Invoice should be created when order still has invoiceable quantity."""
+        mock_frappe.get_single.return_value = self._make_settings()
+        mock_frappe.logger.return_value = MagicMock()
+        mock_session_cls.return_value = MagicMock()
+
+        from connector.api.magento_client import MagentoClient
+        client = MagentoClient()
+        client.get_order = MagicMock(
+            return_value={
+                "status": "pending",
+                "items": [{"item_id": 22, "product_type": "simple", "qty_to_invoice": 1}],
+            }
+        )
+        client.create_invoice = MagicMock(return_value=555)
+
+        result = client.ensure_invoice_for_processing(7)
+
+        self.assertEqual(result, 555)
+        client.create_invoice.assert_called_once_with(7, items=[{"order_item_id": 22, "qty": 1.0}], capture=False, notify=False)
+
 
 class TestMagentoAPIError(unittest.TestCase):
 
