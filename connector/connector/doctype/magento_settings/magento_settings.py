@@ -1,11 +1,29 @@
 import frappe
 from frappe.model.document import Document
+from urllib.parse import urlparse
+
+
+def _validate_secure_url(url: str, label: str) -> str:
+    normalized = (url or "").strip().rstrip("/")
+    if not normalized:
+        return normalized
+
+    parsed = urlparse(normalized)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        frappe.throw(f"{label} must be a valid absolute URL (for example: https://example.com).")
+
+    host = (parsed.hostname or "").lower()
+    is_local = host in ("localhost", "127.0.0.1")
+    if parsed.scheme != "https" and not is_local:
+        frappe.throw(f"{label} must use HTTPS in production.")
+
+    return normalized
 
 
 class MagentoSettings(Document):
     def validate(self):
         if self.magento_url:
-            self.magento_url = self.magento_url.rstrip("/")
+            self.magento_url = _validate_secure_url(self.magento_url, "Magento URL")
 
     @frappe.whitelist()
     def diagnose_sync(self):

@@ -12,6 +12,7 @@ from connector.api.magento_client import MagentoClient, MagentoAPIError
 from connector.connector.doctype.magento_sync_log.magento_sync_log import (
     create_log,
 )
+from urllib.parse import urlparse
 
 
 def _get_item_image_field():
@@ -31,6 +32,25 @@ def _is_sync_enabled():
     except Exception:
         pass
     return bool(frappe.db.get_single_value("Magento Settings", "sync_enabled"))
+
+
+def _is_safe_image_url(image_url, expected_magento_url):
+    image_url = (image_url or "").strip()
+    if not image_url or len(image_url) > 2048:
+        return False
+
+    parsed = urlparse(image_url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return False
+
+    expected = urlparse((expected_magento_url or "").strip())
+    if expected.hostname and parsed.hostname:
+        if expected.hostname.lower() != parsed.hostname.lower():
+            return False
+
+    host = (parsed.hostname or "").lower()
+    is_local = host in ("localhost", "127.0.0.1")
+    return parsed.scheme == "https" or is_local
 
 
 @frappe.whitelist()
@@ -58,6 +78,16 @@ def receive_image_update(sku, image_url):
     if not _is_sync_enabled():
         logger.info("receive_image_update: skipped — sync is disabled.")
         return {"ok": False, "reason": "sync_disabled"}
+
+    sku = (sku or "").strip()
+    if not sku or len(sku) > 255:
+        logger.warning("receive_image_update: invalid sku payload.")
+        return {"ok": False, "reason": "invalid_sku"}
+
+    magento_url = (frappe.db.get_single_value("Magento Settings", "magento_url") or "").strip().rstrip("/")
+    if not _is_safe_image_url(image_url, magento_url):
+        logger.warning(f"receive_image_update: rejected unsafe image_url for SKU '{sku}'.")
+        return {"ok": False, "reason": "invalid_image_url"}
 
     image_field = _get_item_image_field()
     if not image_field:
