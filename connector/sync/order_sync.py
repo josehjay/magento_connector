@@ -296,10 +296,15 @@ def _process_order(order, client):
     # ----- Address -----
     # When billing to a default customer (e.g. "Web Sales"), the address must
     # also be linked to that customer to pass ERPNext's party-address validation.
+    # Create a new address per order so each SO shows the correct shipping
+    # address for that order (no reuse across different buyers).
     address_name = None
     try:
         address_name = get_or_create_address(
-            order, real_customer_name, also_link_to=so_customer
+            order,
+            real_customer_name,
+            also_link_to=so_customer,
+            always_create_new=bool(default_customer),
         )
     except Exception as e:
         # Address is not mandatory — log and continue

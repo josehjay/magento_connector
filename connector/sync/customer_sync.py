@@ -120,7 +120,7 @@ def _ensure_address_linked_to_customer(address_name, customer_name):
         )
 
 
-def get_or_create_address(magento_order, customer_name, also_link_to=None):
+def get_or_create_address(magento_order, customer_name, also_link_to=None, always_create_new=False):
     """
     Create or update the shipping address for a customer.
     Returns the ERPNext Address name, or None if address data is missing.
@@ -128,6 +128,11 @@ def get_or_create_address(magento_order, customer_name, also_link_to=None):
     `also_link_to` — if the Sales Order bills to a different customer (e.g.
     "Web Sales"), pass that name here so the address is linked to both parties.
     ERPNext validates that the shipping address belongs to the SO customer.
+
+    `always_create_new` — when True (e.g. when using a default "Web Sales"
+    customer), always create a new address for this order instead of reusing
+    one linked to the buyer. Ensures each order has its own shipping address
+    and avoids overwriting or reusing addresses across different buyers.
     """
     shipping_address = None
     ext = magento_order.get("extension_attributes") or {}
@@ -157,16 +162,22 @@ def get_or_create_address(magento_order, customer_name, also_link_to=None):
 
     country = _get_country_name(country_code)
 
-    # Check if an address already exists for this customer
-    existing_addr = frappe.db.get_value(
-        "Dynamic Link",
-        {
-            "link_doctype": "Customer",
-            "link_name": customer_name,
-            "parenttype": "Address",
-        },
-        "parent",
-    )
+    # When using a default billing customer (e.g. "Web Sales"), create a new
+    # address per order so each Sales Order has the correct shipping address
+    # for that order; reusing/updating one address would show the wrong or
+    # stale address when different buyers use the same SO customer.
+    if not always_create_new:
+        existing_addr = frappe.db.get_value(
+            "Dynamic Link",
+            {
+                "link_doctype": "Customer",
+                "link_name": customer_name,
+                "parenttype": "Address",
+            },
+            "parent",
+        )
+    else:
+        existing_addr = None
 
     if existing_addr:
         try:
@@ -195,7 +206,11 @@ def get_or_create_address(magento_order, customer_name, also_link_to=None):
 
     # Create new address
     addr = frappe.new_doc("Address")
-    addr.address_title = customer_name
+    increment_id = (magento_order.get("increment_id") or "").strip()
+    if always_create_new and increment_id:
+        addr.address_title = f"{customer_name} - Order #{increment_id}"
+    else:
+        addr.address_title = customer_name
     addr.address_type = "Shipping"
     addr.address_line1 = address_line1 or "N/A"
     addr.address_line2 = address_line2
