@@ -296,15 +296,24 @@ def _process_order(order, client):
     # ----- Address -----
     # When billing to a default customer (e.g. "Web Sales"), the address must
     # also be linked to that customer to pass ERPNext's party-address validation.
-    # Create a new address per order so each SO shows the correct shipping
-    # address for that order (no reuse across different buyers).
-    address_name = None
+    # Create new Magento-derived address docs per order when a default customer
+    # is configured so names and displays never drift across orders.
+    shipping_address_name = None
+    billing_address_name = None
     try:
-        address_name = get_or_create_address(
+        shipping_address_name = get_or_create_address(
             order,
             real_customer_name,
             also_link_to=so_customer,
             always_create_new=bool(default_customer),
+            address_kind="shipping",
+        )
+        billing_address_name = get_or_create_address(
+            order,
+            real_customer_name,
+            also_link_to=so_customer,
+            always_create_new=bool(default_customer),
+            address_kind="billing",
         )
     except Exception as e:
         # Address is not mandatory — log and continue
@@ -357,10 +366,20 @@ def _process_order(order, client):
         if default_pl:
             so.selling_price_list = default_pl
 
-    if address_name:
+    if shipping_address_name:
         try:
-            so.shipping_address_name = address_name
-            so.shipping_address = frappe.db.get_value("Address", address_name, "address_display") or ""
+            so.shipping_address_name = shipping_address_name
+            so.shipping_address = (
+                frappe.db.get_value("Address", shipping_address_name, "address_display") or ""
+            )
+        except Exception:
+            pass  # address display is cosmetic; continue
+    if billing_address_name:
+        try:
+            so.customer_address = billing_address_name
+            so.address_display = (
+                frappe.db.get_value("Address", billing_address_name, "address_display") or ""
+            )
         except Exception:
             pass  # address display is cosmetic; continue
 
@@ -397,6 +416,26 @@ def _process_order(order, client):
         so.run_method("set_missing_values")
     except Exception as e:
         logger.warning(f"Order #{magento_increment_id}: set_missing_values warning (non-fatal): {e}")
+
+    # set_missing_values may override party-address fields based on defaults.
+    # Re-apply Magento-derived addresses so both the displayed text and the
+    # linked address names stay consistent with this order.
+    if shipping_address_name:
+        try:
+            so.shipping_address_name = shipping_address_name
+            so.shipping_address = (
+                frappe.db.get_value("Address", shipping_address_name, "address_display") or ""
+            )
+        except Exception:
+            pass
+    if billing_address_name:
+        try:
+            so.customer_address = billing_address_name
+            so.address_display = (
+                frappe.db.get_value("Address", billing_address_name, "address_display") or ""
+            )
+        except Exception:
+            pass
 
     try:
         so.run_method("calculate_taxes_and_totals")

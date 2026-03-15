@@ -120,9 +120,15 @@ def _ensure_address_linked_to_customer(address_name, customer_name):
         )
 
 
-def get_or_create_address(magento_order, customer_name, also_link_to=None, always_create_new=False):
+def get_or_create_address(
+    magento_order,
+    customer_name,
+    also_link_to=None,
+    always_create_new=False,
+    address_kind="shipping",
+):
     """
-    Create or update the shipping address for a customer.
+    Create or update a Magento-derived address for a customer.
     Returns the ERPNext Address name, or None if address data is missing.
 
     `also_link_to` — if the Sales Order bills to a different customer (e.g.
@@ -133,7 +139,14 @@ def get_or_create_address(magento_order, customer_name, also_link_to=None, alway
     customer), always create a new address for this order instead of reusing
     one linked to the buyer. Ensures each order has its own shipping address
     and avoids overwriting or reusing addresses across different buyers.
+
+    `address_kind` — either "shipping" or "billing". Controls which Magento
+    address payload is used and which ERPNext address_type is assigned.
     """
+    address_kind = (address_kind or "shipping").strip().lower()
+    is_billing = address_kind == "billing"
+    address_type = "Billing" if is_billing else "Shipping"
+
     shipping_address = None
     ext = magento_order.get("extension_attributes") or {}
     assignments = ext.get("shipping_assignments") or []
@@ -141,7 +154,10 @@ def get_or_create_address(magento_order, customer_name, also_link_to=None, alway
         shipping = (assignments[0] or {}).get("shipping") or {}
         shipping_address = shipping.get("address")
 
-    addr_data = shipping_address or magento_order.get("billing_address") or {}
+    if is_billing:
+        addr_data = magento_order.get("billing_address") or shipping_address or {}
+    else:
+        addr_data = shipping_address or magento_order.get("billing_address") or {}
 
     if not addr_data:
         return None
@@ -192,7 +208,7 @@ def get_or_create_address(magento_order, customer_name, also_link_to=None, alway
                     "pincode": pincode,
                     "country": country,
                     "phone": phone,
-                    "address_type": "Shipping",
+                    "address_type": address_type,
                 },
             )
             frappe.db.commit()
@@ -211,7 +227,7 @@ def get_or_create_address(magento_order, customer_name, also_link_to=None, alway
         addr.address_title = f"{customer_name} - Order #{increment_id}"
     else:
         addr.address_title = customer_name
-    addr.address_type = "Shipping"
+    addr.address_type = address_type
     addr.address_line1 = address_line1 or "N/A"
     addr.address_line2 = address_line2
     addr.city = city or "N/A"
