@@ -23,6 +23,7 @@ from connector.connector.doctype.magento_sync_log.magento_sync_log import (
     create_log,
 )
 from connector.sync.customer_sync import get_or_create_customer, get_or_create_address
+from connector.security.request_signing import verify_incoming_signed_request
 
 
 MAGENTO_STATUS_NOTES = {
@@ -69,6 +70,7 @@ def receive_order(order_payload):
     import json
 
     logger = frappe.logger("connector")
+    verify_incoming_signed_request("receive_order")
 
     if not _is_sync_enabled():
         logger.info("receive_order: skipped — sync is disabled.")
@@ -106,6 +108,7 @@ def receive_order_status(entity_id, status):
     an existing order's status changes in Magento.
     """
     logger = frappe.logger("connector")
+    verify_incoming_signed_request("receive_order_status")
 
     if not _is_sync_enabled():
         logger.info("receive_order_status: skipped — sync is disabled.")

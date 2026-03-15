@@ -13,6 +13,7 @@ from connector.connector.doctype.magento_sync_log.magento_sync_log import (
     create_log,
 )
 from urllib.parse import urlparse
+from connector.security.request_signing import verify_incoming_signed_request
 
 
 def _get_item_image_field():
@@ -74,6 +75,7 @@ def receive_image_update(sku, image_url):
     Item image field immediately without a full image sync run.
     """
     logger = frappe.logger("connector")
+    verify_incoming_signed_request("receive_image_update")
 
     if not _is_sync_enabled():
         logger.info("receive_image_update: skipped — sync is disabled.")

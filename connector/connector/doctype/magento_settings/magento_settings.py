@@ -727,6 +727,51 @@ class MagentoSettings(Document):
         else:
             frappe.msgprint("Order sync finished.", indicator="blue")
 
+    @frappe.whitelist()
+    def view_signature_verification_status(self):
+        """
+        Show cached HMAC signature verification diagnostics for inbound
+        Magento push requests.
+        """
+        from connector.security.request_signing import get_signature_diagnostics
+
+        settings = frappe.get_single("Connector Settings")
+        diag = get_signature_diagnostics()
+
+        verify_enabled = bool(getattr(settings, "enable_signed_push_verification", 0))
+        enforce_enabled = bool(getattr(settings, "enforce_signed_push_verification", 0))
+        tolerance = int(getattr(settings, "signature_tolerance_seconds", 300) or 300)
+
+        lines = [
+            "=== SIGNATURE VERIFICATION STATUS ===",
+            "",
+            f"Verify mode enabled : {verify_enabled}",
+            f"Strict enforce mode : {enforce_enabled}",
+            f"Time window (sec)   : {tolerance}",
+            "",
+            f"Last result         : {diag.get('last_result')}",
+            f"Last seen on        : {diag.get('last_seen_on') or '(never)'}",
+            f"Last detail         : {diag.get('last_detail')}",
+            "",
+            f"Total checks        : {diag.get('total_checks', 0)}",
+            f"Successful checks   : {diag.get('success_count', 0)}",
+            f"Warnings (allowed)  : {diag.get('warning_count', 0)}",
+            f"Denied (blocked)    : {diag.get('denied_count', 0)}",
+        ]
+        return _show_report(lines, "Signature Verification Status")
+
+    @frappe.whitelist()
+    def reset_signature_verification_counters(self):
+        """Clear cached signature verification diagnostics counters."""
+        from connector.security.request_signing import reset_signature_diagnostics
+
+        reset_signature_diagnostics()
+        frappe.msgprint(
+            "Signature verification diagnostics counters have been reset.",
+            title="Counters Reset",
+            indicator="green",
+        )
+
 
 # ── Module-level helpers ───────────────────────────────────────────────────
 

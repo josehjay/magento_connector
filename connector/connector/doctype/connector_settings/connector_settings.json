@@ -8,7 +8,12 @@
   "integrations_section",
   "enable_magento_integration",
   "column_break_1",
-  "enable_erpnext_site_sync"
+  "enable_erpnext_site_sync",
+  "security_section",
+  "enable_signed_push_verification",
+  "enforce_signed_push_verification",
+  "signature_tolerance_seconds",
+  "signed_push_secret"
  ],
  "fields": [
   {
@@ -33,6 +38,42 @@
    "fieldtype": "Check",
    "label": "Enable ERPNext Site Sync",
    "description": "When checked, product sync between this site and configured remote ERPNext sites is enabled"
+  },
+  {
+   "fieldname": "security_section",
+   "fieldtype": "Section Break",
+   "label": "Inbound Request Signing",
+   "description": "Hardens incoming Magento push calls with HMAC signing. Use permissive mode first, then enforce after Magento signing is enabled."
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_signed_push_verification",
+   "fieldtype": "Check",
+   "label": "Verify Signed Magento Push Requests",
+   "description": "When enabled, ERPNext validates request signatures when signature headers are present."
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.enable_signed_push_verification",
+   "fieldname": "enforce_signed_push_verification",
+   "fieldtype": "Check",
+   "label": "Enforce Signed Requests (Strict)",
+   "description": "When enabled, unsigned or invalidly signed push requests are rejected."
+  },
+  {
+   "default": "300",
+   "depends_on": "eval:doc.enable_signed_push_verification",
+   "fieldname": "signature_tolerance_seconds",
+   "fieldtype": "Int",
+   "label": "Signature Time Window (seconds)",
+   "description": "Maximum allowed clock skew for request signatures (default: 300)."
+  },
+  {
+   "depends_on": "eval:doc.enable_signed_push_verification",
+   "fieldname": "signed_push_secret",
+   "fieldtype": "Password",
+   "label": "Shared Signing Secret",
+   "description": "Shared HMAC secret used to verify Magento push requests."
   }
  ],
  "issingle": 1,

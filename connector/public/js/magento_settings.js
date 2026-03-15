@@ -140,6 +140,29 @@
                 });
             }, __("Connection"));
 
+            frm.add_custom_button(__("Signature Verification Status"), function () {
+                frappe.call({
+                    doc: frm.doc,
+                    method: "view_signature_verification_status",
+                    freeze: true,
+                    freeze_message: __("Reading signature verification diagnostics…"),
+                });
+            }, __("Connection"));
+
+            frm.add_custom_button(__("Reset Signature Counters"), function () {
+                frappe.confirm(
+                    __("Reset signature verification diagnostics counters now?"),
+                    function () {
+                        frappe.call({
+                            doc: frm.doc,
+                            method: "reset_signature_verification_counters",
+                            freeze: true,
+                            freeze_message: __("Resetting signature diagnostics counters…"),
+                        });
+                    }
+                );
+            }, __("Connection"));
+
             // ── Products group ───────────────────────────────────────────
             frm.add_custom_button(__("Pick Attribute Set"), function () {
                 open_pick_attribute_set_dialog(frm);
