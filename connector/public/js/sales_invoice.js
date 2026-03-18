@@ -12,19 +12,35 @@ frappe.ui.form.on("Sales Invoice", {
         if (frm.doc.docstatus !== 1) return;
         if ((frm.doc.outstanding_amount || 0) <= 0) return;
 
-        // Show the button for all submitted+unpaid invoices that have a linked SO.
-        // The server will tell us if it's not from Magento — this avoids a slow
-        // async check in the refresh handler.
-        var has_linked_so = (frm.doc.items || []).some(function (i) {
-            return i.sales_order;
-        });
-        if (!has_linked_so) return;
+        var sales_orders = _linked_sales_orders(frm);
+        if (!sales_orders.length) return;
 
-        frm.add_custom_button(__("Fetch Magento Payment"), function () {
-            _fetch_and_open_dialog(frm);
-        }, __("Make"));
+        // Show "Fetch Magento Payment" only when at least one linked SO is Magento-originated.
+        frappe.db.get_list("Sales Order", {
+            fields: ["name"],
+            filters: [
+                ["name", "in", sales_orders],
+                ["magento_order_id", "is", "set"],
+            ],
+            limit: 1,
+        }).then(function (rows) {
+            if (!rows || !rows.length) return;
+            frm.add_custom_button(__("Fetch Magento Payment"), function () {
+                _fetch_and_open_dialog(frm);
+            }, __("Make"));
+        });
     },
 });
+
+function _linked_sales_orders(frm) {
+    var unique = Object.create(null);
+    (frm.doc.items || []).forEach(function (item) {
+        if (item.sales_order) {
+            unique[item.sales_order] = true;
+        }
+    });
+    return Object.keys(unique);
+}
 
 // ── Step 1: call server ──────────────────────────────────────────────────────
 
