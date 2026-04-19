@@ -214,12 +214,67 @@ class MagentoSettings(Document):
     @frappe.whitelist()
     def test_connection(self):
         """Test connectivity to Magento and return a success/failure message."""
-        from connector.api.magento_client import MagentoClient
+        from connector.api.magento_client import MagentoClient, MagentoAPIError
+
+        checks = [
+            (
+                "Catalog",
+                "/products/attribute-sets/sets/list",
+                {"searchCriteria[pageSize]": 1},
+            ),
+            (
+                "Sales",
+                "/orders",
+                {
+                    "searchCriteria[pageSize]": 1,
+                    "searchCriteria[currentPage]": 1,
+                },
+            ),
+        ]
+
         try:
             client = MagentoClient()
-            result = client.get("/store/storeConfigs")
+            successful_checks = []
+            authz_failures = []
+            other_failures = []
+
+            for label, endpoint, params in checks:
+                try:
+                    client.get(endpoint, params=params)
+                    successful_checks.append(label)
+                except MagentoAPIError as api_err:
+                    if api_err.status_code in (401, 403):
+                        authz_failures.append(f"{label} ({endpoint})")
+                    else:
+                        other_failures.append(str(api_err))
+                except Exception as check_err:
+                    other_failures.append(str(check_err))
+
+            if other_failures:
+                raise Exception(other_failures[0])
+
+            if not successful_checks:
+                permission_hint = (
+                    "Token is valid but lacks required API resources for this connector."
+                    if authz_failures
+                    else "No connector API resources were reachable."
+                )
+                details = (
+                    f" Failed checks: {', '.join(authz_failures)}."
+                    if authz_failures
+                    else ""
+                )
+                raise Exception(
+                    permission_hint
+                    + details
+                    + " In Magento Admin > System > Extensions > Integrations, grant"
+                    + " Catalog, Inventory, Sales, and Customers API resources, then"
+                    + " re-activate the integration to refresh the token."
+                )
+
             frappe.msgprint(
-                f"Connection successful! Store: {result[0].get('base_url', self.magento_url)}",
+                "Connection successful! Magento API is reachable."
+                + (f" Verified resources: {', '.join(successful_checks)}." if successful_checks else ""),
                 title="Magento Connected",
                 indicator="green",
             )
