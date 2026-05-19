@@ -219,7 +219,7 @@ class MagentoSettings(Document):
         checks = [
             (
                 "Catalog",
-                "/products/attribute-sets/sets/list",
+                "/products",
                 {"searchCriteria[pageSize]": 1},
             ),
             (
@@ -235,16 +235,24 @@ class MagentoSettings(Document):
         try:
             client = MagentoClient()
             successful_checks = []
-            authz_failures = []
+            unauthorized_failures = []
+            forbidden_failures = []
             other_failures = []
+            auth_mode = (
+                "Integration Access Token"
+                if client.use_integration_token
+                else "Admin Username/Password"
+            )
 
             for label, endpoint, params in checks:
                 try:
                     client.get(endpoint, params=params)
                     successful_checks.append(label)
                 except MagentoAPIError as api_err:
-                    if api_err.status_code in (401, 403):
-                        authz_failures.append(f"{label} ({endpoint})")
+                    if api_err.status_code == 401:
+                        unauthorized_failures.append(f"{label} ({endpoint})")
+                    elif api_err.status_code == 403:
+                        forbidden_failures.append(f"{label} ({endpoint})")
                     else:
                         other_failures.append(str(api_err))
                 except Exception as check_err:
@@ -254,26 +262,32 @@ class MagentoSettings(Document):
                 raise Exception(other_failures[0])
 
             if not successful_checks:
-                permission_hint = (
-                    "Token is valid but lacks required API resources for this connector."
-                    if authz_failures
-                    else "No connector API resources were reachable."
-                )
-                details = (
-                    f" Failed checks: {', '.join(authz_failures)}."
-                    if authz_failures
-                    else ""
-                )
-                raise Exception(
-                    permission_hint
-                    + details
-                    + " In Magento Admin > System > Extensions > Integrations, grant"
-                    + " Catalog, Inventory, Sales, and Customers API resources, then"
-                    + " re-activate the integration to refresh the token."
-                )
+                if unauthorized_failures:
+                    details = f" Failed checks: {', '.join(unauthorized_failures)}."
+                    raise Exception(
+                        "Authentication failed (HTTP 401). The credentials/token are invalid, expired,"
+                        + " or the connector is using a different auth mode than expected."
+                        + f" Active auth mode: {auth_mode}."
+                        + details
+                        + " Verify credentials in Magento Settings and save again."
+                    )
+
+                if forbidden_failures:
+                    details = f" Failed checks: {', '.join(forbidden_failures)}."
+                    raise Exception(
+                        "Token is valid but lacks required API resources for this connector."
+                        + f" Active auth mode: {auth_mode}."
+                        + details
+                        + " In Magento Admin > System > Extensions > Integrations, grant"
+                        + " Catalog, Inventory, Sales, and Customers API resources, then"
+                        + " re-activate the integration to refresh the token."
+                    )
+
+                raise Exception("No connector API resources were reachable.")
 
             frappe.msgprint(
                 "Connection successful! Magento API is reachable."
+                + f" Auth mode: {auth_mode}."
                 + (f" Verified resources: {', '.join(successful_checks)}." if successful_checks else ""),
                 title="Magento Connected",
                 indicator="green",
