@@ -292,29 +292,32 @@ class MagentoSettings(Document):
             if other_failures:
                 raise Exception(other_failures[0])
 
-            if not successful_checks:
-                if unauthorized_failures:
-                    details = f" Failed checks: {', '.join(unauthorized_failures)}."
-                    raise Exception(
-                        "Authentication failed (HTTP 401). The credentials/token are invalid, expired,"
-                        + " or the connector is using a different auth mode than expected."
-                        + f" Active auth mode: {auth_mode}."
-                        + details
-                        + " Verify credentials in Magento Settings and save again."
-                    )
+            # Hard fail only when authentication itself is invalid.
+            if unauthorized_failures and not successful_checks and not forbidden_failures:
+                details = f" Failed checks: {', '.join(unauthorized_failures)}."
+                raise Exception(
+                    "Authentication failed (HTTP 401). The credentials/token are invalid, expired,"
+                    + " or the connector is using a different auth mode than expected."
+                    + f" Active auth mode: {auth_mode}."
+                    + details
+                    + " Verify credentials in Magento Settings and save again."
+                )
 
-                if forbidden_failures:
-                    details = f" Failed checks: {', '.join(forbidden_failures)}."
-                    raise Exception(
-                        "Token is valid but lacks required API resources for this connector."
-                        + f" Active auth mode: {auth_mode}."
-                        + details
-                        + " In Magento Admin > System > Extensions > Integrations, grant"
-                        + " Catalog, Inventory, Sales, and Customers API resources, then"
-                        + " re-activate the integration to refresh the token."
-                    )
-
-                raise Exception("No connector API resources were reachable.")
+            # Treat ACL denials as a warning if auth works but required scopes are missing.
+            if forbidden_failures:
+                verified = f" Verified resources: {', '.join(successful_checks)}." if successful_checks else ""
+                denied = f" Missing resources: {', '.join(forbidden_failures)}."
+                frappe.msgprint(
+                    "Magento connected, but the integration token has limited API scopes."
+                    + f" Auth mode: {auth_mode}."
+                    + verified
+                    + denied
+                    + " Order reconciliation and product catalog operations may be limited until these permissions are granted"
+                    + " in Magento Admin > System > Extensions > Integrations.",
+                    title="Magento Connected With Limited Permissions",
+                    indicator="orange",
+                )
+                return
 
             frappe.msgprint(
                 "Connection successful! Magento API is reachable."
