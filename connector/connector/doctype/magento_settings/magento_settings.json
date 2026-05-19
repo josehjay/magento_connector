@@ -73,7 +73,7 @@
    "fieldname": "access_token",
    "fieldtype": "Password",
    "label": "Integration Access Token",
-   "description": "Pre-generated access token from Magento Admin > System > Integrations"
+   "description": "Pre-generated access token from Magento Admin > System > Integrations. Tip (Magento 2.4.4+): enable Stores > Settings > Configuration > Services > OAuth > Consumer Settings > Allow OAuth Access Tokens to be used as standalone Bearer tokens = Yes, then save and flush Magento cache."
   },
   {
    "fieldname": "store_section",
