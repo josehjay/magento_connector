@@ -216,6 +216,16 @@ class MagentoSettings(Document):
         """Test connectivity to Magento and return a success/failure message."""
         from connector.api.magento_client import MagentoClient, MagentoAPIError
 
+        def _looks_like_acl_denial(response_body: str) -> bool:
+            body = (response_body or "").lower()
+            return (
+                "isn't authorized to access" in body
+                or "is not authorized to access" in body
+                or "consumer isn't authorized" in body
+                or "consumer is not authorized" in body
+                or "resources" in body and "authorized" in body
+            )
+
         checks = [
             (
                 "Catalog",
@@ -249,7 +259,16 @@ class MagentoSettings(Document):
                     client.get(endpoint, params=params)
                     successful_checks.append(label)
                 except MagentoAPIError as api_err:
-                    if api_err.status_code == 401:
+                    # Magento sometimes reports ACL denials as 401 instead of 403.
+                    if api_err.status_code == 401 and _looks_like_acl_denial(api_err.response_body):
+                        reason = (api_err.response_body or "").strip().replace("\n", " ")
+                        if len(reason) > 180:
+                            reason = reason[:180] + "..."
+                        failure = f"{label} ({endpoint})"
+                        if reason:
+                            failure += f" -> {reason}"
+                        forbidden_failures.append(failure)
+                    elif api_err.status_code == 401:
                         reason = (api_err.response_body or "").strip().replace("\n", " ")
                         if len(reason) > 180:
                             reason = reason[:180] + "..."
