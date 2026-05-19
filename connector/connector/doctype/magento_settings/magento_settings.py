@@ -250,9 +250,21 @@ class MagentoSettings(Document):
                     successful_checks.append(label)
                 except MagentoAPIError as api_err:
                     if api_err.status_code == 401:
-                        unauthorized_failures.append(f"{label} ({endpoint})")
+                        reason = (api_err.response_body or "").strip().replace("\n", " ")
+                        if len(reason) > 180:
+                            reason = reason[:180] + "..."
+                        failure = f"{label} ({endpoint})"
+                        if reason:
+                            failure += f" -> {reason}"
+                        unauthorized_failures.append(failure)
                     elif api_err.status_code == 403:
-                        forbidden_failures.append(f"{label} ({endpoint})")
+                        reason = (api_err.response_body or "").strip().replace("\n", " ")
+                        if len(reason) > 180:
+                            reason = reason[:180] + "..."
+                        failure = f"{label} ({endpoint})"
+                        if reason:
+                            failure += f" -> {reason}"
+                        forbidden_failures.append(failure)
                     else:
                         other_failures.append(str(api_err))
                 except Exception as check_err:

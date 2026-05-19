@@ -7,6 +7,7 @@ import time
 import frappe
 import requests
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
 
 class MagentoAPIError(Exception):
@@ -29,15 +30,26 @@ class MagentoClient:
 
     def __init__(self):
         settings = frappe.get_single("Magento Settings")
-        self.base_url = settings.magento_url.rstrip("/")
+        self.base_url = self._normalize_base_url(settings.magento_url)
         self.store_code = settings.magento_store_code or "default"
-        self.api_base = f"{self.base_url}/rest/{self.store_code}/V1"
         self.use_integration_token = bool(settings.use_integration_token)
 
         if self.use_integration_token:
-            self._token = settings.get_password("access_token")
+            raw_token = settings.get_password("access_token")
+            self._token = self._normalize_access_token(raw_token)
+            if not self._token:
+                raise MagentoAPIError(
+                    "Integration token mode is enabled, but no token is configured in Magento Settings."
+                )
         else:
             self._token = self._get_or_refresh_admin_token(settings)
+
+        scoped_api_base = f"{self.base_url}/rest/{self.store_code}/V1"
+        global_api_base = f"{self.base_url}/rest/V1"
+        self.api_bases = [scoped_api_base]
+        if global_api_base not in self.api_bases:
+            self.api_bases.append(global_api_base)
+        self.api_base = self.api_bases[0]
 
         self.session = requests.Session()
         self.session.headers.update({
@@ -48,6 +60,45 @@ class MagentoClient:
     # ------------------------------------------------------------------
     # Token management
     # ------------------------------------------------------------------
+
+    def _normalize_base_url(self, url):
+        """
+        Normalize the Magento base URL.
+        Accepts values like:
+          https://store.example.com
+          https://store.example.com/
+          https://store.example.com/rest
+          https://store.example.com/rest/default/V1
+        and always returns:
+          https://store.example.com
+        """
+        normalized = (url or "").strip().rstrip("/")
+        if not normalized:
+            raise MagentoAPIError("Magento URL is not configured.")
+
+        parsed = urlparse(normalized)
+        if not parsed.scheme or not parsed.netloc:
+            raise MagentoAPIError(
+                "Magento URL must be an absolute URL, for example: https://store.example.com"
+            )
+
+        path = (parsed.path or "").rstrip("/")
+        if path:
+            segments = [seg for seg in path.split("/") if seg]
+            if "rest" in segments:
+                rest_idx = segments.index("rest")
+                segments = segments[:rest_idx]
+            path = "/" + "/".join(segments) if segments else ""
+
+        clean = f"{parsed.scheme}://{parsed.netloc}{path}"
+        return clean
+
+    def _normalize_access_token(self, token):
+        """Trim whitespace/quotes and accept tokens pasted as 'Bearer <token>'."""
+        value = (token or "").strip().strip("'").strip('"')
+        if value.lower().startswith("bearer "):
+            value = value[7:].strip()
+        return value
 
     def _get_or_refresh_admin_token(self, settings):
         """Return cached admin token or fetch a fresh one."""
@@ -89,37 +140,58 @@ class MagentoClient:
 
     def _request(self, method, endpoint, data=None, params=None, timeout=None):
         """Execute an HTTP request with retry on rate-limit (429) and timeouts."""
-        url = f"{self.api_base}{endpoint}"
         req_timeout = timeout or (10, 120)  # (connect_timeout, read_timeout)
-        for attempt in range(1, self.MAX_RETRIES + 1):
-            try:
-                resp = self.session.request(
-                    method,
-                    url,
-                    json=data,
-                    params=params,
-                    timeout=req_timeout,
-                )
-                if resp.status_code == 429:
-                    wait = self.RETRY_BACKOFF ** attempt
-                    frappe.logger("connector").warning(
-                        f"Rate limited by Magento. Waiting {wait}s (attempt {attempt}/{self.MAX_RETRIES})"
+        last_error = None
+
+        for api_base in self.api_bases:
+            self.api_base = api_base
+            url = f"{api_base}{endpoint}"
+
+            for attempt in range(1, self.MAX_RETRIES + 1):
+                try:
+                    resp = self.session.request(
+                        method,
+                        url,
+                        json=data,
+                        params=params,
+                        timeout=req_timeout,
                     )
-                    time.sleep(wait)
-                    continue
-                if resp.status_code >= 400:
-                    raise MagentoAPIError(
-                        f"Magento API error [{resp.status_code}]: {resp.text}",
-                        resp.status_code,
-                        resp.text,
-                    )
-                return resp.json() if resp.text else {}
-            except MagentoAPIError:
-                raise
-            except requests.RequestException as e:
-                if attempt == self.MAX_RETRIES:
-                    raise MagentoAPIError(f"Request failed after {self.MAX_RETRIES} attempts: {e}")
-                time.sleep(self.RETRY_BACKOFF ** attempt)
+                    if resp.status_code == 429:
+                        wait = self.RETRY_BACKOFF ** attempt
+                        frappe.logger("connector").warning(
+                            f"Rate limited by Magento. Waiting {wait}s (attempt {attempt}/{self.MAX_RETRIES})"
+                        )
+                        time.sleep(wait)
+                        continue
+                    if resp.status_code >= 400:
+                        err = MagentoAPIError(
+                            f"Magento API error [{resp.status_code}] via {api_base}: {resp.text}",
+                            resp.status_code,
+                            resp.text,
+                        )
+                        last_error = err
+                        break
+                    return resp.json() if resp.text else {}
+                except requests.RequestException as e:
+                    if attempt == self.MAX_RETRIES:
+                        last_error = MagentoAPIError(
+                            f"Request failed after {self.MAX_RETRIES} attempts via {api_base}: {e}"
+                        )
+                    else:
+                        time.sleep(self.RETRY_BACKOFF ** attempt)
+                        continue
+
+            # If we got a hard non-recoverable auth error, try next base once.
+            if isinstance(last_error, MagentoAPIError) and last_error.status_code in (401, 403):
+                continue
+
+            # For other hard API errors (4xx/5xx), do not hide with additional fallbacks.
+            if last_error:
+                raise last_error
+
+        if last_error:
+            raise last_error
+        raise MagentoAPIError("Magento API request failed for an unknown reason.")
 
     def get(self, endpoint, params=None, timeout=None):
         return self._request("GET", endpoint, params=params, timeout=timeout)
