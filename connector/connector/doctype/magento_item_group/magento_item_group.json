@@ -6,9 +6,7 @@
  "field_order": [
   "item_group",
   "attribute_set_id",
-  "attribute_set_name",
-  "attribute_mappings_section",
-  "attribute_mappings"
+  "attribute_set_name"
  ],
  "fields": [
   {
@@ -33,19 +31,6 @@
    "in_list_view": 1,
    "label": "Magento Attribute Set",
    "description": "Select an attribute set using 'Pick Attribute Set' in the Actions menu"
-  },
-  {
-   "fieldname": "attribute_mappings_section",
-   "fieldtype": "Section Break",
-   "label": "Attribute Mappings",
-   "description": "Map ERPNext item fields to Magento attribute codes for products in this attribute set. Use 'Build Attribute Mappings' in the Products menu to browse available Magento attributes."
-  },
-  {
-   "fieldname": "attribute_mappings",
-   "fieldtype": "Table",
-   "label": "Attribute Mappings",
-   "options": "Magento Attribute Mapping",
-   "description": "Each row maps one ERPNext value (field, barcode, attribute, or fixed text) to a Magento product attribute code."
   }
  ],
  "istable": 1,

@@ -730,39 +730,14 @@ class MagentoClient:
             result = self.get("/products/attributes", params=params)
         except MagentoAPIError:
             return []
-        return self._parse_product_attributes_response(result)
-
-    def get_product_attributes_for_set(self, attribute_set_id):
-        """
-        GET product attributes assigned to a specific Magento attribute set.
-        Returns list of dicts with attribute_code, frontend_label.
-        Falls back to all product attributes if the per-set endpoint fails.
-        """
-        params = {"searchCriteria[pageSize]": 500}
-        try:
-            result = self.get(
-                f"/products/attribute-sets/{int(attribute_set_id)}/attributes",
-                params=params,
-            )
-            attrs = self._parse_product_attributes_response(result)
-            if attrs:
-                return attrs
-        except MagentoAPIError:
-            pass
-        return self.get_product_attributes()
-
-    def _parse_product_attributes_response(self, result):
-        """Parse Magento product attributes from various response shapes."""
         items = result.get("items", result) if isinstance(result, dict) else result
         if not isinstance(items, list):
             items = [items] if items else []
         return [
             {
                 "attribute_code": x.get("attribute_code", ""),
-                "frontend_label": (
-                    x.get("default_frontend_label", "") or x.get("attribute_code", "")
-                ),
+                "frontend_label": x.get("default_frontend_label", "") or x.get("attribute_code", ""),
             }
             for x in items
-            if isinstance(x, dict) and x.get("attribute_code")
+            if x.get("attribute_code")
         ]

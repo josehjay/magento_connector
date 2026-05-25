@@ -25,63 +25,6 @@ class MagentoSettings(Document):
         if self.magento_url:
             self.magento_url = _validate_secure_url(self.magento_url, "Magento URL")
 
-        # Frappe does not persist nested child tables (child of a child) through the
-        # standard save flow. Capture the attribute_mappings data here, keyed by
-        # item_group (a stable identifier), so on_update() can write them to the DB
-        # after the Magento Item Group rows have received their final names.
-        self._pending_attribute_mappings = {}
-        for row in self.magento_item_groups or []:
-            mappings = []
-            for m in (row.get("attribute_mappings") or []):
-                if not (m.get("magento_attribute_code") or "").strip():
-                    continue  # skip incomplete rows
-                mappings.append({
-                    "enabled": int(m.get("enabled") if m.get("enabled") is not None else 1),
-                    "erpnext_source": (m.get("erpnext_source") or "").strip(),
-                    "erpnext_field": (m.get("erpnext_field") or "").strip(),
-                    "magento_attribute_code": (m.get("magento_attribute_code") or "").strip(),
-                })
-            if row.item_group:
-                self._pending_attribute_mappings[row.item_group] = mappings
-
-    def on_update(self):
-        self._persist_nested_attribute_mappings()
-
-    def _persist_nested_attribute_mappings(self):
-        """
-        Explicitly save Magento Attribute Mapping rows for each Magento Item Group row.
-        Called from on_update() after the standard save has assigned final DB names
-        to all Magento Item Group rows.
-        """
-        pending = getattr(self, "_pending_attribute_mappings", None)
-        if pending is None:
-            return
-
-        for row in self.magento_item_groups or []:
-            if not row.item_group:
-                continue
-
-            mappings = pending.get(row.item_group) or []
-
-            frappe.db.delete("Magento Attribute Mapping", {
-                "parent": row.name,
-                "parenttype": "Magento Item Group",
-            })
-
-            for idx, m in enumerate(mappings):
-                new_row = frappe.new_doc("Magento Attribute Mapping")
-                new_row.update({
-                    "parent": row.name,
-                    "parenttype": "Magento Item Group",
-                    "parentfield": "attribute_mappings",
-                    "idx": idx + 1,
-                    "enabled": m["enabled"],
-                    "erpnext_source": m["erpnext_source"],
-                    "erpnext_field": m["erpnext_field"],
-                    "magento_attribute_code": m["magento_attribute_code"],
-                })
-                new_row.db_insert()
-
     @frappe.whitelist()
     def diagnose_sync(self):
         """

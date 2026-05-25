@@ -98,87 +98,6 @@ def _backoff_minutes(retry_count):
     return min(5 * (2 ** (retry_count - 1)), 60)
 
 
-def _get_attribute_mappings_for_item_group(settings, item_group):
-    """
-    Return the list of enabled Magento Attribute Mapping rows for the given Item Group.
-
-    Frappe does not auto-load nested child tables (child of a child), so we query
-    the Magento Attribute Mapping table directly using the Magento Item Group row
-    name as the parent reference.
-    """
-    for row in settings.magento_item_groups or []:
-        if row.item_group == item_group:
-            return frappe.get_all(
-                "Magento Attribute Mapping",
-                filters={
-                    "parent": row.name,
-                    "parenttype": "Magento Item Group",
-                    "enabled": 1,
-                },
-                fields=["erpnext_source", "erpnext_field", "magento_attribute_code"],
-                order_by="idx asc",
-            )
-    return []
-
-
-def _resolve_attribute_value(doc, source, field):
-    """
-    Resolve the value to send to Magento given an ERPNext source type and specifier.
-
-    source / field combinations:
-      "Item Field"    / field_name      → doc.field_name (any Item doctype field)
-      "Item Barcode"  / barcode_type    → first matching barcode; blank = any type
-      "Item Attribute"/ attribute_name  → variant attribute value (Item Variant Attribute)
-      "Custom Value"  / literal_text    → the field string itself, sent verbatim
-
-    Returns a non-empty string or None (mapping is skipped when None).
-    """
-    source = (source or "").strip()
-    field = (field or "").strip()
-
-    if source == "Item Field":
-        if not field:
-            return None
-        val = doc.get(field)
-        if val is None:
-            return None
-        result = str(val).strip()
-        return result or None
-
-    elif source == "Item Barcode":
-        if not frappe.db.table_exists("Item Barcode"):
-            return None
-        filters = {"parent": doc.item_code}
-        if field:
-            filters["barcode_type"] = field
-        rows = frappe.get_all(
-            "Item Barcode",
-            filters=filters,
-            fields=["barcode"],
-            limit=1,
-            order_by="idx asc",
-        )
-        return (rows[0]["barcode"] or None) if rows else None
-
-    elif source == "Item Attribute":
-        if not field or not frappe.db.table_exists("Item Variant Attribute"):
-            return None
-        rows = frappe.get_all(
-            "Item Variant Attribute",
-            filters={"parent": doc.item_code, "attribute": field},
-            fields=["attribute_value"],
-            limit=1,
-        )
-        if rows:
-            return (rows[0].get("attribute_value") or "").strip() or None
-        return None
-
-    elif source == "Custom Value":
-        return field or None
-
-    return None
-
-
 def _get_variant_attributes(item_code):
     """
     Return list of {attribute_code, value} for an Item variant from Item Variant Attribute.
@@ -223,28 +142,15 @@ def _build_product_payload(doc):
     is_template = bool(doc.get("has_variants"))
     type_id = "configurable" if is_template else "simple"
 
-    # Build custom_attributes as a dict to deduplicate: later entries override earlier ones,
-    # so attribute mappings can intentionally override the defaults (e.g. remap description).
-    custom_attrs = {
-        "description": description,
-        "short_description": description[:255],
-    }
+    custom_attributes = [
+        {"attribute_code": "description", "value": description},
+        {"attribute_code": "short_description", "value": description[:255]},
+    ]
 
     # Variant: add configurable-option attributes so Magento can link this simple to the configurable
     if doc.get("variant_of"):
         for attr in _get_variant_attributes(doc.item_code):
-            custom_attrs[attr["attribute_code"]] = attr["value"]
-
-    # Dynamic attribute mappings configured per attribute set in Magento Settings
-    for mapping in _get_attribute_mappings_for_item_group(settings, doc.item_group or ""):
-        value = _resolve_attribute_value(doc, mapping.erpnext_source, mapping.erpnext_field)
-        if value is not None:
-            custom_attrs[mapping.magento_attribute_code] = value
-
-    custom_attributes = [
-        {"attribute_code": code, "value": val}
-        for code, val in custom_attrs.items()
-    ]
+            custom_attributes.append(attr)
 
     payload = {
         "sku": doc.item_code,

@@ -61,19 +61,3 @@ def get_magento_product_attributes():
         return {"ok": False, "error": str(e), "items": []}
 
 
-@frappe.whitelist()
-def get_magento_attributes_for_set(attribute_set_id):
-    """
-    Return list of {attribute_code, frontend_label} for a specific Magento attribute set.
-    Falls back to all product attributes when the per-set endpoint is unavailable.
-    """
-    try:
-        client = MagentoClient()
-        attrs = client.get_product_attributes_for_set(int(attribute_set_id))
-        return {"ok": True, "items": attrs}
-    except MagentoAPIError as e:
-        frappe.log_error(f"Magento attributes for set {attribute_set_id}: {e}", "Connector Magento Options")
-        return {"ok": False, "error": str(e), "items": []}
-    except Exception as e:
-        frappe.log_error(frappe.get_traceback(), "Connector Magento Options")
-        return {"ok": False, "error": str(e), "items": []}
