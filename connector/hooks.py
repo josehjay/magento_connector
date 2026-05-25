@@ -99,9 +99,10 @@ boot_session = "connector.boot.boot_session"
 
 # Client-side scripts loaded on specific DocType forms
 doctype_js = {
-    "Magento Item Group": "public/js/magento_item_group.js",
-    "Magento Settings":   "public/js/magento_settings.js",
-    "Item":               "public/js/item.js",
-    "Sales Order":        "public/js/sales_order.js",
-    "Sales Invoice":      "public/js/sales_invoice.js",
+    "Magento Item Group":       "public/js/magento_item_group.js",
+    "Magento Attribute Mapping": "public/js/magento_item_group.js",
+    "Magento Settings":         "public/js/magento_settings.js",
+    "Item":                     "public/js/item.js",
+    "Sales Order":              "public/js/sales_order.js",
+    "Sales Invoice":            "public/js/sales_invoice.js",
 }

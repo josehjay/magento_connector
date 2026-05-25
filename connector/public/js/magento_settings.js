@@ -1,4 +1,4 @@
-// Magento Settings — Item Groups attribute set picker + action buttons
+// Magento Settings — Item Groups attribute set picker, attribute mapping builder, and action buttons
 
 (function () {
     "use strict";
@@ -103,6 +103,172 @@
         });
     }
 
+    // ── Attribute Mapping builder ──────────────────────────────────────────
+
+    var SOURCE_DESCRIPTIONS = {
+        "Item Field":     __("ERPNext Item field name (e.g. item_code, item_name, weight_per_unit, description)"),
+        "Item Barcode":   __("Barcode type filter (e.g. EAN-13, UPC-A). Leave blank to use the first barcode regardless of type."),
+        "Item Attribute": __("Item Attribute name used in variants (e.g. Color, Size). Only populated for variant items."),
+        "Custom Value":   __("Literal text to always send as-is to Magento for every item in this attribute set."),
+    };
+
+    function render_attributes_table(frm, $wrapper, attrs, row_idx) {
+        if (!attrs || !attrs.length) {
+            $wrapper.html('<p class="text-muted">' + __("No attributes found for this set.") + "</p>");
+            return;
+        }
+
+        var html = '<div style="max-height:360px;overflow-y:auto;">';
+        html += '<input type="text" class="form-control input-sm mb-2" id="attr-search" placeholder="' + __("Filter attributes…") + '" style="margin-bottom:6px;">';
+        html += '<table class="table table-bordered table-condensed" style="font-size:12px;">';
+        html += "<thead><tr>";
+        html += "<th>" + __("Attribute Code") + "</th>";
+        html += "<th>" + __("Label") + "</th>";
+        html += "<th>" + __("ERPNext Source") + "</th>";
+        html += "<th>" + __("ERPNext Field / Value") + "</th>";
+        html += "<th></th>";
+        html += "</tr></thead><tbody id='attr-tbody'>";
+
+        attrs.forEach(function (attr, i) {
+            var code = frappe.utils.escape_html(attr.attribute_code || "");
+            var label = frappe.utils.escape_html(attr.frontend_label || attr.attribute_code || "");
+            var source_opts = ["Item Field", "Item Barcode", "Item Attribute", "Custom Value"].map(function (s) {
+                return '<option value="' + s + '">' + __(s) + "</option>";
+            }).join("");
+            html += '<tr data-code="' + code + '" data-label="' + label.toLowerCase() + '">';
+            html += "<td><code>" + code + "</code></td>";
+            html += "<td>" + label + "</td>";
+            html += '<td><select class="form-control input-sm src-select" style="min-width:110px;">' + source_opts + "</select></td>";
+            html += '<td><input type="text" class="form-control input-sm field-input" style="min-width:110px;" placeholder="' + __("field name…") + '"></td>';
+            html += '<td><button class="btn btn-xs btn-primary add-mapping-btn" data-idx="' + row_idx + '" data-code="' + code + '">' + __("+ Add") + "</button></td>";
+            html += "</tr>";
+        });
+
+        html += "</tbody></table></div>";
+        $wrapper.html(html);
+
+        // Live filter
+        $wrapper.find("#attr-search").on("input", function () {
+            var q = ($(this).val() || "").toLowerCase().trim();
+            $wrapper.find("#attr-tbody tr").each(function () {
+                var match = !q || $(this).data("code").toLowerCase().indexOf(q) !== -1
+                                || $(this).data("label").toLowerCase().indexOf(q) !== -1;
+                $(this).toggle(match);
+            });
+        });
+
+        // Source select → update field placeholder
+        $wrapper.find(".src-select").on("change", function () {
+            var src = $(this).val();
+            var $input = $(this).closest("tr").find(".field-input");
+            $input.attr("placeholder", SOURCE_DESCRIPTIONS[src] || __("field name…"));
+        });
+
+        // Add button → insert a mapping row into the Item Group's attribute_mappings
+        $wrapper.find(".add-mapping-btn").on("click", function () {
+            var $btn = $(this);
+            var code = $btn.data("code");
+            var idx = parseInt($btn.data("idx"), 10);
+            var $tr = $btn.closest("tr");
+            var src = $tr.find(".src-select").val() || "Item Field";
+            var field_val = $tr.find(".field-input").val() || "";
+
+            var item_group_row = frm.doc.magento_item_groups[idx];
+            if (!item_group_row) {
+                frappe.show_alert({ message: __("Row not found. Save and try again."), indicator: "orange" });
+                return;
+            }
+
+            var new_row = frappe.model.add_child(
+                item_group_row,
+                "Magento Attribute Mapping",
+                "attribute_mappings"
+            );
+            frappe.model.set_value(new_row.doctype, new_row.name, "magento_attribute_code", code);
+            frappe.model.set_value(new_row.doctype, new_row.name, "erpnext_source", src);
+            frappe.model.set_value(new_row.doctype, new_row.name, "erpnext_field", field_val);
+            frappe.model.set_value(new_row.doctype, new_row.name, "enabled", 1);
+            frm.refresh_field("magento_item_groups");
+            frappe.show_alert({ message: __("Mapping added: ") + code, indicator: "green" });
+            $btn.prop("disabled", true).text(__("Added ✓"));
+        });
+    }
+
+    function open_build_mappings_dialog(frm) {
+        var ig_rows = (frm.doc.magento_item_groups || []).map(function (row, idx) {
+            var name = (row.item_group || __("(no group)"));
+            var set_name = row.attribute_set_name ? (" — " + row.attribute_set_name) : "";
+            return { label: name + set_name, value: idx, row: row };
+        });
+
+        if (!ig_rows.length) {
+            frappe.msgprint({ message: __("Add at least one row in Item Groups to Sync first, then pick an attribute set for it."), indicator: "orange" });
+            return;
+        }
+
+        var d = new frappe.ui.Dialog({
+            title: __("Build Attribute Mappings"),
+            size: "extra-large",
+            fields: [
+                {
+                    fieldtype: "HTML",
+                    fieldname: "intro_html",
+                    options: '<p class="text-muted small">' +
+                        __("Select an Item Group row, then load its Magento attribute set. " +
+                           "Click <b>+ Add</b> next to any attribute to insert it into that row's mapping table. " +
+                           "Fill in the ERPNext source and field before adding, or edit the row afterwards.") +
+                        "</p>",
+                },
+                {
+                    fieldtype: "Select",
+                    fieldname: "row_index",
+                    label: __("Item Group Row"),
+                    options: ig_rows.map(function (r) { return r.label; }).join("\n"),
+                    reqd: 1,
+                },
+                {
+                    fieldtype: "Button",
+                    fieldname: "load_btn",
+                    label: __("Load Magento Attributes for this Set"),
+                },
+                {
+                    fieldtype: "HTML",
+                    fieldname: "attrs_html",
+                },
+            ],
+            primary_action_label: __("Done"),
+            primary_action: function () { d.hide(); },
+        });
+
+        d.fields_dict.load_btn.$input.on("click", function () {
+            var label = d.get_value("row_index");
+            var found = ig_rows.find(function (r) { return r.label === label; });
+            if (!found) return;
+
+            if (!found.row.attribute_set_id) {
+                frappe.show_alert({ message: __("Pick an attribute set for this row first (use 'Pick Attribute Set')."), indicator: "orange" });
+                return;
+            }
+
+            frappe.call({
+                method: "connector.api.magento_options.get_magento_attributes_for_set",
+                args: { attribute_set_id: found.row.attribute_set_id },
+                freeze: true,
+                freeze_message: __("Loading attributes for ") + (found.row.attribute_set_name || found.row.attribute_set_id) + "…",
+                callback: function (r) {
+                    var $w = d.fields_dict.attrs_html.$wrapper;
+                    if (r.exc || !r.message || !r.message.ok) {
+                        $w.html('<p class="text-danger">' + __("Could not load attributes. Check connection.") + "</p>");
+                        return;
+                    }
+                    render_attributes_table(frm, $w, r.message.items || [], found.value);
+                },
+            });
+        });
+
+        d.show();
+    }
+
     // ── Main form handler ─────────────────────────────────────────────────
 
     frappe.ui.form.on("Magento Settings", {
@@ -168,32 +334,8 @@
                 open_pick_attribute_set_dialog(frm);
             }, __("Products"));
 
-            frm.add_custom_button(__("Barcode Sync Help"), function () {
-                var textbook_set = frm.doc.textbook_attribute_set_name || "Textbook";
-                var textbook_attr = frm.doc.textbook_barcode_attribute || "isbn";
-                var default_attr = frm.doc.default_barcode_attribute || "barcode";
-                var enabled = frm.doc.sync_barcode_to_magento
-                    ? __("Enabled")
-                    : __("Disabled — check <b>Sync Barcode to Magento</b> below to enable.");
-                frappe.msgprint({
-                    title: __("Barcode Sync Configuration"),
-                    indicator: frm.doc.sync_barcode_to_magento ? "green" : "orange",
-                    message: [
-                        "<b>" + __("Status") + ":</b> " + enabled,
-                        "",
-                        "<b>" + __("How it works") + ":</b>",
-                        __("When enabled, the first barcode on each Item is pushed to Magento as a custom attribute during product sync."),
-                        "",
-                        "<table class='table table-bordered table-condensed'>",
-                        "<thead><tr><th>" + __("Attribute Set") + "</th><th>" + __("Magento Attribute Code") + "</th></tr></thead>",
-                        "<tbody>",
-                        "<tr><td><b>" + frappe.utils.escape_html(textbook_set) + "</b> " + __("(Textbook)") + "</td><td><code>" + frappe.utils.escape_html(textbook_attr) + "</code></td></tr>",
-                        "<tr><td>" + __("All other attribute sets") + "</td><td><code>" + frappe.utils.escape_html(default_attr) + "</code></td></tr>",
-                        "</tbody></table>",
-                        "",
-                        __("These attribute codes must exist in your Magento catalog. Edit them in the <b>Barcode Sync</b> section below."),
-                    ].join("<br>"),
-                });
+            frm.add_custom_button(__("Build Attribute Mappings"), function () {
+                open_build_mappings_dialog(frm);
             }, __("Products"));
 
             frm.add_custom_button(__("Sync All Products Now"), function () {
