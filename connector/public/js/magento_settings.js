@@ -168,6 +168,34 @@
                 open_pick_attribute_set_dialog(frm);
             }, __("Products"));
 
+            frm.add_custom_button(__("Barcode Sync Help"), function () {
+                var textbook_set = frm.doc.textbook_attribute_set_name || "Textbook";
+                var textbook_attr = frm.doc.textbook_barcode_attribute || "isbn";
+                var default_attr = frm.doc.default_barcode_attribute || "barcode";
+                var enabled = frm.doc.sync_barcode_to_magento
+                    ? __("Enabled")
+                    : __("Disabled — check <b>Sync Barcode to Magento</b> below to enable.");
+                frappe.msgprint({
+                    title: __("Barcode Sync Configuration"),
+                    indicator: frm.doc.sync_barcode_to_magento ? "green" : "orange",
+                    message: [
+                        "<b>" + __("Status") + ":</b> " + enabled,
+                        "",
+                        "<b>" + __("How it works") + ":</b>",
+                        __("When enabled, the first barcode on each Item is pushed to Magento as a custom attribute during product sync."),
+                        "",
+                        "<table class='table table-bordered table-condensed'>",
+                        "<thead><tr><th>" + __("Attribute Set") + "</th><th>" + __("Magento Attribute Code") + "</th></tr></thead>",
+                        "<tbody>",
+                        "<tr><td><b>" + frappe.utils.escape_html(textbook_set) + "</b> " + __("(Textbook)") + "</td><td><code>" + frappe.utils.escape_html(textbook_attr) + "</code></td></tr>",
+                        "<tr><td>" + __("All other attribute sets") + "</td><td><code>" + frappe.utils.escape_html(default_attr) + "</code></td></tr>",
+                        "</tbody></table>",
+                        "",
+                        __("These attribute codes must exist in your Magento catalog. Edit them in the <b>Barcode Sync</b> section below."),
+                    ].join("<br>"),
+                });
+            }, __("Products"));
+
             frm.add_custom_button(__("Sync All Products Now"), function () {
                 frappe.confirm(__("Queue a full product sync? This runs in the background."), function () {
                     frappe.call({

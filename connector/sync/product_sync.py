@@ -98,6 +98,35 @@ def _backoff_minutes(retry_count):
     return min(5 * (2 ** (retry_count - 1)), 60)
 
 
+def _get_attribute_set_name_for_item_group(item_group):
+    """
+    Return the Magento attribute set name for the given Item Group from Magento Settings.
+    Returns an empty string if not configured.
+    """
+    settings = frappe.get_single("Magento Settings")
+    for row in settings.magento_item_groups or []:
+        if row.item_group == item_group and row.get("attribute_set_name"):
+            return (row.attribute_set_name or "").strip()
+    return ""
+
+
+def _get_first_barcode(item_code):
+    """
+    Return the first barcode value for an Item, or None if none exist.
+    Reads from the standard Item Barcode child table.
+    """
+    if not frappe.db.table_exists("Item Barcode"):
+        return None
+    rows = frappe.get_all(
+        "Item Barcode",
+        filters={"parent": item_code},
+        fields=["barcode"],
+        limit=1,
+        order_by="idx asc",
+    )
+    return rows[0]["barcode"] if rows else None
+
+
 def _get_variant_attributes(item_code):
     """
     Return list of {attribute_code, value} for an Item variant from Item Variant Attribute.
@@ -151,6 +180,18 @@ def _build_product_payload(doc):
     if doc.get("variant_of"):
         for attr in _get_variant_attributes(doc.item_code):
             custom_attributes.append(attr)
+
+    # Barcode: push to isbn (Textbook attribute set) or default barcode attribute
+    if settings.get("sync_barcode_to_magento"):
+        barcode_value = _get_first_barcode(doc.item_code)
+        if barcode_value:
+            attr_set_name = _get_attribute_set_name_for_item_group(doc.item_group or "")
+            textbook_set = (settings.get("textbook_attribute_set_name") or "Textbook").strip()
+            if attr_set_name and attr_set_name.lower() == textbook_set.lower():
+                barcode_code = (settings.get("textbook_barcode_attribute") or "isbn").strip() or "isbn"
+            else:
+                barcode_code = (settings.get("default_barcode_attribute") or "barcode").strip() or "barcode"
+            custom_attributes.append({"attribute_code": barcode_code, "value": barcode_value})
 
     payload = {
         "sku": doc.item_code,

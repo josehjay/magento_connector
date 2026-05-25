@@ -23,6 +23,12 @@
   "column_break_order",
   "item_group_filter_section",
   "magento_item_groups",
+  "barcode_sync_section",
+  "sync_barcode_to_magento",
+  "default_barcode_attribute",
+  "column_break_barcode",
+  "textbook_attribute_set_name",
+  "textbook_barcode_attribute",
   "sync_section",
   "sync_enabled",
   "send_stock_to_magento",
@@ -140,6 +146,44 @@
    "fieldtype": "Int",
    "label": "Order Lead Time (Days)",
    "description": "Number of days added to order date to set ERPNext delivery date"
+  },
+  {
+   "fieldname": "barcode_sync_section",
+   "fieldtype": "Section Break",
+   "label": "Barcode Sync",
+   "description": "Configure how Item barcodes are synced to Magento product attributes. The Textbook attribute set can send the barcode to a separate ISBN attribute instead of the default."
+  },
+  {
+   "default": "0",
+   "fieldname": "sync_barcode_to_magento",
+   "fieldtype": "Check",
+   "label": "Sync Barcode to Magento",
+   "description": "When enabled, the first barcode on each Item will be pushed to Magento as a custom attribute during product sync."
+  },
+  {
+   "default": "barcode",
+   "fieldname": "default_barcode_attribute",
+   "fieldtype": "Data",
+   "label": "Default Barcode Attribute Code",
+   "description": "Magento attribute code to receive the barcode value for all attribute sets except the Textbook set (e.g. barcode, ean, gtin)."
+  },
+  {
+   "fieldname": "column_break_barcode",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Textbook",
+   "fieldname": "textbook_attribute_set_name",
+   "fieldtype": "Data",
+   "label": "Textbook Attribute Set Name",
+   "description": "The Magento attribute set name (as shown in the Item Groups table) that should receive the barcode as ISBN. Case-insensitive match."
+  },
+  {
+   "default": "isbn",
+   "fieldname": "textbook_barcode_attribute",
+   "fieldtype": "Data",
+   "label": "Textbook Barcode Attribute Code",
+   "description": "Magento attribute code used for the barcode when the item belongs to the Textbook attribute set (e.g. isbn)."
   },
   {
    "fieldname": "sync_section",
