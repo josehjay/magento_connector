@@ -100,12 +100,24 @@ def _backoff_minutes(retry_count):
 
 def _get_attribute_mappings_for_item_group(settings, item_group):
     """
-    Return the list of enabled Magento Attribute Mapping rows configured for the
-    given Item Group, or an empty list if none are defined.
+    Return the list of enabled Magento Attribute Mapping rows for the given Item Group.
+
+    Frappe does not auto-load nested child tables (child of a child), so we query
+    the Magento Attribute Mapping table directly using the Magento Item Group row
+    name as the parent reference.
     """
     for row in settings.magento_item_groups or []:
         if row.item_group == item_group:
-            return [m for m in (row.attribute_mappings or []) if m.get("enabled")]
+            return frappe.get_all(
+                "Magento Attribute Mapping",
+                filters={
+                    "parent": row.name,
+                    "parenttype": "Magento Item Group",
+                    "enabled": 1,
+                },
+                fields=["erpnext_source", "erpnext_field", "magento_attribute_code"],
+                order_by="idx asc",
+            )
     return []
 
 
