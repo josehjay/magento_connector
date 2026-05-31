@@ -111,6 +111,54 @@ class TestProductSync(unittest.TestCase):
             push_item_to_magento("TEST-SKU-001")
             mock_client_cls.assert_not_called()
 
+    @patch("connector.sync.product_sync.frappe")
+    @patch("connector.sync.product_sync.get_magento_product_id")
+    def test_on_item_trash_enqueues_magento_removal(self, mock_get_id, mock_frappe):
+        """on_item_trash should enqueue remove_from_magento for synced items."""
+        mock_frappe.db.get_single_value.return_value = True
+        mock_get_id.return_value = 101
+        doc = MagicMock(item_code="TEST-SKU-001")
+        doc.get.return_value = 1
+
+        from connector.sync.product_sync import on_item_trash
+        on_item_trash(doc, "on_trash")
+
+        mock_frappe.enqueue.assert_called_once_with(
+            "connector.sync.product_sync.remove_from_magento",
+            queue="default",
+            timeout=60,
+            job_id="magento_remove_TEST-SKU-001",
+            deduplicate=True,
+            enqueue_after_commit=True,
+            item_code="TEST-SKU-001",
+        )
+
+    @patch("connector.sync.product_sync.frappe")
+    @patch("connector.sync.product_sync.delete_map")
+    @patch("connector.sync.product_sync.get_magento_product_id")
+    @patch("connector.sync.product_sync.create_log")
+    @patch("connector.sync.product_sync.MagentoClient")
+    def test_remove_from_magento_skips_item_field_clear_if_item_deleted(
+        self,
+        mock_client_cls,
+        mock_log,
+        mock_get_id,
+        mock_delete_map,
+        mock_frappe,
+    ):
+        """remove_from_magento should not call set_value when Item row is gone."""
+        mock_get_id.return_value = 101
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_frappe.db.exists.return_value = False
+
+        from connector.sync.product_sync import remove_from_magento
+        remove_from_magento("TEST-SKU-001")
+
+        mock_client.delete_product.assert_called_once_with("TEST-SKU-001")
+        mock_frappe.db.set_value.assert_not_called()
+        mock_frappe.db.commit.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

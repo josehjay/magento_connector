@@ -223,6 +223,33 @@ def on_item_save(doc, method):
     )
 
 
+def on_item_trash(doc, method):
+    """
+    Hook: Item on_trash.
+    When a synced ERPNext item is deleted, enqueue removal from Magento.
+    """
+    if not _is_sync_enabled():
+        return
+
+    item_code = doc.item_code
+    has_map = bool(get_magento_product_id(item_code))
+
+    # Only attempt Magento removal when this item was intended for Magento sync
+    # or we still have an existing map entry to clean up.
+    if not doc.get("sync_to_magento") and not has_map:
+        return
+
+    frappe.enqueue(
+        "connector.sync.product_sync.remove_from_magento",
+        queue="default",
+        timeout=60,
+        job_id=f"magento_remove_{item_code}",
+        deduplicate=True,
+        enqueue_after_commit=True,
+        item_code=item_code,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Remove product from Magento
 # ---------------------------------------------------------------------------
@@ -248,15 +275,16 @@ def remove_from_magento(item_code):
         frappe.log_error(frappe.get_traceback(), "Connector: Remove from Magento")
 
     delete_map(item_code)
-    frappe.db.set_value(
-        "Item",
-        item_code,
-        {
-            "magento_product_id": None,
-            "magento_last_synced_on": None,
-            "magento_sync_error": "",
-        },
-    )
+    if frappe.db.exists("Item", item_code):
+        frappe.db.set_value(
+            "Item",
+            item_code,
+            {
+                "magento_product_id": None,
+                "magento_last_synced_on": None,
+                "magento_sync_error": "",
+            },
+        )
     frappe.db.commit()
     create_log(
         operation="Remove from Magento",

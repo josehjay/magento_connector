@@ -46,6 +46,9 @@ doc_events = {
             "connector.sync.product_sync.on_item_save",
             "connector.sync.erpnext_product_sync.on_item_save",
         ],
+        "on_trash": [
+            "connector.sync.product_sync.on_item_trash",
+        ],
     },
     "Sales Order": {
         # on_submit → Magento "processing" (order confirmed in ERP)
