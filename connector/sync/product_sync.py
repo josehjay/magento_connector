@@ -42,6 +42,59 @@ BATCH_JOB_TIMEOUT = 900
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _enqueue_product_job(method_path, item_code, timeout=120):
+    """Enqueue a product sync job with consistent defaults."""
+    job_prefix = "magento_remove_" if "remove_from_magento" in method_path else "magento_product_sync_"
+    frappe.enqueue(
+        method_path,
+        queue="default",
+        timeout=timeout,
+        job_id=f"{job_prefix}{item_code}",
+        deduplicate=True,
+        enqueue_after_commit=True,
+        item_code=item_code,
+    )
+
+
+def _run_immediately_after_commit(item_code, mode):
+    """
+    Run product sync/removal immediately after commit.
+    Falls back to queue execution when post-commit callbacks are unavailable
+    or immediate execution raises.
+    """
+    if mode not in ("push", "remove"):
+        return
+
+    method_path = (
+        "connector.sync.product_sync.push_item_to_magento"
+        if mode == "push"
+        else "connector.sync.product_sync.remove_from_magento"
+    )
+    timeout = 120 if mode == "push" else 60
+
+    def _runner():
+        try:
+            if mode == "push":
+                push_item_to_magento(item_code)
+            else:
+                remove_from_magento(item_code)
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"Connector Immediate Product {mode.title()} Failed: {item_code}",
+            )
+            _enqueue_product_job(method_path, item_code, timeout=timeout)
+
+    after_commit = getattr(getattr(frappe, "db", None), "after_commit", None)
+    add_callback = getattr(after_commit, "add", None)
+
+    if callable(add_callback):
+        add_callback(_runner)
+        return
+
+    _enqueue_product_job(method_path, item_code, timeout=timeout)
+
+
 def _is_magento_enabled():
     try:
         return bool(frappe.db.get_single_value("Connector Settings", "enable_magento_integration"))
@@ -184,49 +237,28 @@ def on_item_save(doc, method):
     """
     Hook: Item after_insert / on_update.
     - Deselected sync_to_magento → remove from Magento and map.
-    - Enabled sync_to_magento + allowed group → enqueue push to Magento (deduplicated).
-
-    Any change (name, description, price, status, weight, etc.) triggers a push
-    once the user saves; the background job loads the committed doc and sends the
-    full payload to Magento. User can also click "Push to Magento" after saving.
-
-    Uses enqueue_after_commit=True so the job sees committed data,
-    and job_name to prevent duplicate queue entries for the same item.
+    - Enabled sync_to_magento + allowed group → push to Magento immediately
+      after commit; fallback to queue if immediate execution fails.
     """
     if not _is_sync_enabled():
         return
 
     if not doc.get("sync_to_magento"):
         if get_magento_product_id(doc.item_code):
-            frappe.enqueue(
-                "connector.sync.product_sync.remove_from_magento",
-                queue="default",
-                timeout=60,
-                job_id=f"magento_remove_{doc.item_code}",
-                deduplicate=True,
-                enqueue_after_commit=True,
-                item_code=doc.item_code,
-            )
+            _run_immediately_after_commit(doc.item_code, mode="remove")
         return
 
     if not _is_item_group_allowed(doc.item_group):
         return
 
-    frappe.enqueue(
-        "connector.sync.product_sync.push_item_to_magento",
-        queue="default",
-        timeout=120,
-        job_id=f"magento_product_sync_{doc.item_code}",
-        deduplicate=True,
-        enqueue_after_commit=True,
-        item_code=doc.item_code,
-    )
+    _run_immediately_after_commit(doc.item_code, mode="push")
 
 
 def on_item_trash(doc, method):
     """
     Hook: Item on_trash.
-    When a synced ERPNext item is deleted, enqueue removal from Magento.
+    When a synced ERPNext item is deleted, remove it from Magento immediately
+    after commit; fallback to queue if immediate execution fails.
     """
     if not _is_sync_enabled():
         return
@@ -239,15 +271,7 @@ def on_item_trash(doc, method):
     if not doc.get("sync_to_magento") and not has_map:
         return
 
-    frappe.enqueue(
-        "connector.sync.product_sync.remove_from_magento",
-        queue="default",
-        timeout=60,
-        job_id=f"magento_remove_{item_code}",
-        deduplicate=True,
-        enqueue_after_commit=True,
-        item_code=item_code,
-    )
+    _run_immediately_after_commit(item_code, mode="remove")
 
 
 # ---------------------------------------------------------------------------
