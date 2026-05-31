@@ -274,6 +274,31 @@ def on_item_trash(doc, method):
     _run_immediately_after_commit(item_code, mode="remove")
 
 
+def on_item_price_change(doc, method):
+    """
+    Hook: Item Price after_insert / on_update / on_trash.
+    When the configured Magento selling price list changes, sync that item to Magento.
+    """
+    if not _is_sync_enabled():
+        return
+
+    item_code = (doc.get("item_code") or "").strip()
+    if not item_code:
+        return
+
+    configured_price_list = frappe.db.get_single_value("Magento Settings", "price_list")
+    if not configured_price_list:
+        return
+
+    if doc.get("price_list") != configured_price_list:
+        return
+
+    if not doc.get("selling"):
+        return
+
+    _run_immediately_after_commit(item_code, mode="push")
+
+
 # ---------------------------------------------------------------------------
 # Remove product from Magento
 # ---------------------------------------------------------------------------

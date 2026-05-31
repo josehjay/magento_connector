@@ -50,6 +50,11 @@ doc_events = {
             "connector.sync.product_sync.on_item_trash",
         ],
     },
+    "Item Price": {
+        "after_insert": "connector.sync.product_sync.on_item_price_change",
+        "on_update": "connector.sync.product_sync.on_item_price_change",
+        "on_trash": "connector.sync.product_sync.on_item_price_change",
+    },
     "Sales Order": {
         # on_submit → Magento "processing" (order confirmed in ERP)
         "on_submit": "connector.sync.status_sync.on_sales_order_submit",
