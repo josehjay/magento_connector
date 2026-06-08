@@ -96,26 +96,43 @@ def on_item_save(doc, method):
     """
     Hook called on Item after_insert and on_update.
     Pushes the item to all enabled remote ERPNext sites if conditions are met.
+
+    Wrapped in a broad try/except: a failure here must NOT abort the user's
+    Item save. Remote-site sync is best-effort.
     """
-    if not _is_erpnext_site_sync_enabled():
-        return
-    if not doc.get("sync_to_erpnext_sites"):
-        return
+    try:
+        if not _is_erpnext_site_sync_enabled():
+            return
+        if not doc.get("sync_to_erpnext_sites"):
+            return
 
-    sites = _get_enabled_sites()
-    if not sites:
-        return
+        item_code = (doc.get("item_code") or doc.get("name") or "").strip()
+        if not item_code:
+            return
 
-    for site_name in sites:
-        frappe.enqueue(
-            "connector.sync.erpnext_product_sync.push_item_to_site",
-            queue="default",
-            timeout=120,
-            job_id=f"erpnext_push_{site_name}_{doc.item_code}",
-            deduplicate=True,
-            item_code=doc.item_code,
-            remote_site=site_name,
-        )
+        sites = _get_enabled_sites()
+        if not sites:
+            return
+
+        for site_name in sites:
+            frappe.enqueue(
+                "connector.sync.erpnext_product_sync.push_item_to_site",
+                queue="default",
+                timeout=120,
+                job_id=f"erpnext_push_{site_name}_{item_code}",
+                deduplicate=True,
+                enqueue_after_commit=True,
+                item_code=item_code,
+                remote_site=site_name,
+            )
+    except Exception:
+        try:
+            frappe.log_error(
+                frappe.get_traceback(),
+                "Connector Hook Failed: Item.erpnext_product_sync.on_item_save",
+            )
+        except Exception:
+            pass
 
 
 @frappe.whitelist()
@@ -153,8 +170,21 @@ def push_item_to_site(item_code, remote_site):
     if not _is_erpnext_site_sync_enabled():
         return
 
+    if not item_code or not frappe.db.exists("Item", item_code):
+        # Item gone between enqueue and execution; don't crash the worker.
+        frappe.logger("connector").info(
+            f"push_item_to_site: Item '{item_code}' no longer exists; skipping."
+        )
+        return
+
     doc = frappe.get_doc("Item", item_code)
     if not doc.get("sync_to_erpnext_sites"):
+        return
+
+    if not frappe.db.exists("Remote ERPNext Site", remote_site):
+        frappe.logger("connector").info(
+            f"push_item_to_site: Remote ERPNext Site '{remote_site}' missing; skipping."
+        )
         return
 
     site_doc = frappe.get_doc("Remote ERPNext Site", remote_site)

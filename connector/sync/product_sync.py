@@ -220,6 +220,32 @@ def _build_product_payload(doc):
 # Doc event hook (real-time, called on every Item save)
 # ---------------------------------------------------------------------------
 
+def _safe_hook(label):
+    """
+    Decorator: never let a connector doc-event hook raise.
+    A failure inside any of these hooks must not abort the user's save —
+    we log the traceback and return cleanly. Magento sync is best-effort.
+    """
+    def _wrap(fn):
+        def _inner(doc, method):
+            try:
+                return fn(doc, method)
+            except Exception:
+                try:
+                    frappe.log_error(
+                        frappe.get_traceback(),
+                        f"Connector Hook Failed: {label}",
+                    )
+                except Exception:
+                    # Logging itself must not propagate
+                    pass
+        _inner.__name__ = fn.__name__
+        _inner.__doc__ = fn.__doc__
+        return _inner
+    return _wrap
+
+
+@_safe_hook("Item.on_item_save")
 def on_item_save(doc, method):
     """
     Hook: Item after_insert / on_update.
@@ -234,17 +260,22 @@ def on_item_save(doc, method):
     if not _is_sync_enabled():
         return
 
+    item_code = (doc.get("item_code") or doc.get("name") or "").strip()
+    if not item_code:
+        return
+
     if not doc.get("sync_to_magento"):
-        if get_magento_product_id(doc.item_code):
-            _enqueue_product_sync(doc.item_code, mode="remove")
+        if get_magento_product_id(item_code):
+            _enqueue_product_sync(item_code, mode="remove")
         return
 
-    if not _is_item_group_allowed(doc.item_group):
+    if not _is_item_group_allowed(doc.get("item_group")):
         return
 
-    _enqueue_product_sync(doc.item_code, mode="push")
+    _enqueue_product_sync(item_code, mode="push")
 
 
+@_safe_hook("Item.on_item_trash")
 def on_item_trash(doc, method):
     """
     Hook: Item on_trash.
@@ -254,7 +285,10 @@ def on_item_trash(doc, method):
     if not _is_sync_enabled():
         return
 
-    item_code = doc.item_code
+    item_code = (doc.get("item_code") or doc.get("name") or "").strip()
+    if not item_code:
+        return
+
     has_map = bool(get_magento_product_id(item_code))
 
     # Only attempt Magento removal when this item was intended for Magento sync
@@ -265,6 +299,7 @@ def on_item_trash(doc, method):
     _enqueue_product_sync(item_code, mode="remove")
 
 
+@_safe_hook("Item Price.on_item_price_change")
 def on_item_price_change(doc, method):
     """
     Hook: Item Price after_insert / on_update / on_trash.
@@ -348,6 +383,15 @@ def push_item_to_magento(item_code):
     On failure: increments retry counter and records last_failed_at for backoff.
     """
     if not _is_sync_enabled():
+        return
+
+    if not item_code or not frappe.db.exists("Item", item_code):
+        # Item was deleted between enqueue and execution, or item_code is bogus.
+        # Don't raise — that would crash the worker and surface as a user error
+        # if anything ever calls this synchronously.
+        frappe.logger("connector").info(
+            f"push_item_to_magento: Item '{item_code}' no longer exists; skipping."
+        )
         return
 
     doc = frappe.get_doc("Item", item_code)
