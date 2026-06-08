@@ -56,11 +56,18 @@ def _enqueue_product_job(method_path, item_code, timeout=120):
     )
 
 
-def _run_immediately_after_commit(item_code, mode):
+def _enqueue_product_sync(item_code, mode):
     """
-    Run product sync/removal immediately after commit.
-    Falls back to queue execution when post-commit callbacks are unavailable
-    or immediate execution raises.
+    Queue a product push or removal so it runs in a background worker
+    AFTER the current transaction commits.
+
+    Doing the Magento API calls inline (inside an `after_commit` callback)
+    holds the user's save HTTP request open while Magento is contacted.
+    If Magento is slow, unreachable, or any of the multiple intermediate
+    `frappe.db.commit()` calls error out, the response can collapse into a
+    Frappe website 404 page (the user sees "Item <name> not found").
+    Always enqueueing keeps saves instant and isolates Magento failures
+    from the user's request.
     """
     if mode not in ("push", "remove"):
         return
@@ -71,26 +78,6 @@ def _run_immediately_after_commit(item_code, mode):
         else "connector.sync.product_sync.remove_from_magento"
     )
     timeout = 120 if mode == "push" else 60
-
-    def _runner():
-        try:
-            if mode == "push":
-                push_item_to_magento(item_code)
-            else:
-                remove_from_magento(item_code)
-        except Exception:
-            frappe.log_error(
-                frappe.get_traceback(),
-                f"Connector Immediate Product {mode.title()} Failed: {item_code}",
-            )
-            _enqueue_product_job(method_path, item_code, timeout=timeout)
-
-    after_commit = getattr(getattr(frappe, "db", None), "after_commit", None)
-    add_callback = getattr(after_commit, "add", None)
-
-    if callable(add_callback):
-        add_callback(_runner)
-        return
 
     _enqueue_product_job(method_path, item_code, timeout=timeout)
 
@@ -236,29 +223,33 @@ def _build_product_payload(doc):
 def on_item_save(doc, method):
     """
     Hook: Item after_insert / on_update.
-    - Deselected sync_to_magento → remove from Magento and map.
-    - Enabled sync_to_magento + allowed group → push to Magento immediately
-      after commit; fallback to queue if immediate execution fails.
+    - Deselected sync_to_magento → enqueue removal from Magento and map.
+    - Enabled sync_to_magento + allowed group → enqueue a push to Magento.
+
+    The actual Magento API calls run in a background worker (deduplicated
+    by item_code) AFTER the current ERPNext transaction commits. This keeps
+    the user's save fast and prevents Magento outages or slow responses
+    from breaking the Item form.
     """
     if not _is_sync_enabled():
         return
 
     if not doc.get("sync_to_magento"):
         if get_magento_product_id(doc.item_code):
-            _run_immediately_after_commit(doc.item_code, mode="remove")
+            _enqueue_product_sync(doc.item_code, mode="remove")
         return
 
     if not _is_item_group_allowed(doc.item_group):
         return
 
-    _run_immediately_after_commit(doc.item_code, mode="push")
+    _enqueue_product_sync(doc.item_code, mode="push")
 
 
 def on_item_trash(doc, method):
     """
     Hook: Item on_trash.
-    When a synced ERPNext item is deleted, remove it from Magento immediately
-    after commit; fallback to queue if immediate execution fails.
+    When a synced ERPNext item is deleted, enqueue removal from Magento so
+    the worker can call the Magento API after the delete commits.
     """
     if not _is_sync_enabled():
         return
@@ -271,13 +262,14 @@ def on_item_trash(doc, method):
     if not doc.get("sync_to_magento") and not has_map:
         return
 
-    _run_immediately_after_commit(item_code, mode="remove")
+    _enqueue_product_sync(item_code, mode="remove")
 
 
 def on_item_price_change(doc, method):
     """
     Hook: Item Price after_insert / on_update / on_trash.
-    When the configured Magento selling price list changes, sync that item to Magento.
+    When the configured Magento selling price list changes, enqueue a push
+    of that item to Magento.
     """
     if not _is_sync_enabled():
         return
@@ -296,7 +288,7 @@ def on_item_price_change(doc, method):
     if not doc.get("selling"):
         return
 
-    _run_immediately_after_commit(item_code, mode="push")
+    _enqueue_product_sync(item_code, mode="push")
 
 
 # ---------------------------------------------------------------------------

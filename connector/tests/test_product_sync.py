@@ -114,7 +114,7 @@ class TestProductSync(unittest.TestCase):
     @patch("connector.sync.product_sync.frappe")
     @patch("connector.sync.product_sync.get_magento_product_id")
     def test_on_item_trash_enqueues_magento_removal(self, mock_get_id, mock_frappe):
-        """on_item_trash should register immediate post-commit removal."""
+        """on_item_trash should enqueue a Magento removal job after commit."""
         mock_frappe.db.get_single_value.return_value = True
         mock_get_id.return_value = 101
         doc = MagicMock(item_code="TEST-SKU-001")
@@ -123,7 +123,16 @@ class TestProductSync(unittest.TestCase):
         from connector.sync.product_sync import on_item_trash
         on_item_trash(doc, "on_trash")
 
-        mock_frappe.db.after_commit.add.assert_called_once()
+        mock_frappe.enqueue.assert_called_once()
+        kwargs = mock_frappe.enqueue.call_args.kwargs
+        self.assertEqual(kwargs.get("item_code"), "TEST-SKU-001")
+        self.assertEqual(kwargs.get("job_id"), "magento_remove_TEST-SKU-001")
+        self.assertTrue(kwargs.get("enqueue_after_commit"))
+        self.assertTrue(kwargs.get("deduplicate"))
+        self.assertEqual(
+            mock_frappe.enqueue.call_args.args[0],
+            "connector.sync.product_sync.remove_from_magento",
+        )
 
     @patch("connector.sync.product_sync.frappe")
     @patch("connector.sync.product_sync.delete_map")
