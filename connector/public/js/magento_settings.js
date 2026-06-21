@@ -105,8 +105,79 @@
 
     // ── Product map rebuild (read-only Magento) ───────────────────────────
 
+    function format_rebuild_progress_html(prog) {
+        if (!prog || prog.status === "idle") {
+            return "<p class='text-muted'>" + __("No rebuild in progress.") + "</p>";
+        }
+        var status = prog.status || "unknown";
+        var status_class =
+            status === "complete" ? "text-success"
+                : status === "failed" ? "text-danger"
+                    : status === "stale" ? "text-warning"
+                        : "text-info";
+        var lines = [
+            "<p><strong>" + __("Rebuild progress") + "</strong> " +
+                "<span class='" + status_class + "'>(" + status + ")</span></p>",
+            "<ul style='margin-bottom:8px'>",
+            "<li>" + __("Processed") + ": <strong>" + (prog.processed || 0) + " / " + (prog.total || 0) +
+                "</strong> (" + (prog.percent || 0) + "%)</li>",
+            "<li>" + __("Mapped") + ": " + (prog.mapped || 0) + "</li>",
+            "<li>" + __("Not in Magento") + ": " + (prog.skipped_not_in_magento || 0) + "</li>",
+            "<li>" + __("Already mapped") + ": " + (prog.skipped_existing || 0) + "</li>",
+            "<li>" + __("Failed") + ": " + (prog.failed || 0) + "</li>",
+            "<li>" + __("Remaining") + ": " + (prog.remaining || 0) + "</li>",
+            "</ul>",
+        ];
+        if (prog.message) {
+            lines.push("<p class='text-muted' style='font-size:11px'>" + frappe.utils.escape_html(prog.message) + "</p>");
+        }
+        if (prog.last_error) {
+            lines.push("<p class='text-danger' style='font-size:11px'>" +
+                __("Last error") + ": " + frappe.utils.escape_html(prog.last_error) + "</p>");
+        }
+        if (prog.started_at) {
+            lines.push("<p class='text-muted' style='font-size:11px'>" +
+                __("Started") + ": " + prog.started_at +
+                (prog.last_updated ? " · " + __("Updated") + ": " + prog.last_updated : "") +
+                "</p>");
+        }
+        return lines.join("");
+    }
+
+    function fetch_rebuild_progress(frm, $target, on_done) {
+        frappe.call({
+            doc: frm.doc,
+            method: "get_product_map_rebuild_progress",
+            callback: function (r) {
+                if (r.message && $target) {
+                    $target.html(format_rebuild_progress_html(r.message));
+                }
+                if (on_done) on_done(r.message || {});
+            },
+        });
+    }
+
     function open_product_map_rebuild_dialog(frm) {
         var test_passed = false;
+        var progress_timer = null;
+
+        function stop_progress_poll() {
+            if (progress_timer) {
+                clearInterval(progress_timer);
+                progress_timer = null;
+            }
+        }
+
+        function start_progress_poll($target) {
+            stop_progress_poll();
+            progress_timer = setInterval(function () {
+                fetch_rebuild_progress(frm, $target, function (prog) {
+                    if (prog.status !== "running") {
+                        stop_progress_poll();
+                    }
+                });
+            }, 5000);
+        }
 
         var precautions_html =
             "<div style='font-size:12px;line-height:1.5'>" +
@@ -114,6 +185,7 @@
             "<ul>" +
             "<li>Reads existing Magento products by SKU (GET only) — <strong>does not change Magento</strong></li>" +
             "<li>Recreates <em>Magento Product Map</em> rows and Item <em>magento_product_id</em> in ERPNext</li>" +
+            "<li>Items already mapped (<em>Synced</em>) are excluded from the rebuild and not sent to Magento</li>" +
             "<li>Only items with <em>Sync to Magento</em> checked are included</li>" +
             "</ul>" +
             "<p><strong>Precautions</strong></p>" +
@@ -169,6 +241,15 @@
                 },
                 {
                     fieldtype: "Section Break",
+                    label: __("Progress"),
+                },
+                {
+                    fieldtype: "HTML",
+                    fieldname: "rebuild_progress",
+                    options: "<p class='text-muted'>" + __("Refresh to see rebuild progress.") + "</p>",
+                },
+                {
+                    fieldtype: "Section Break",
                     label: __("Step 3 — Rebuild all"),
                 },
                 {
@@ -180,9 +261,14 @@
             ],
             primary_action_label: __("Close"),
             primary_action: function () {
+                stop_progress_poll();
                 d.hide();
             },
         });
+
+        d.onhide = function () {
+            stop_progress_poll();
+        };
 
         function run_preview() {
             frappe.call({
@@ -289,7 +375,11 @@
                                 freeze_message: __("Queueing full rebuild…"),
                                 callback: function (r) {
                                     if (!r.exc) {
-                                        d.hide();
+                                        fetch_rebuild_progress(frm, d.fields_dict.rebuild_progress.$wrapper, function (prog) {
+                                            if (prog.status === "running") {
+                                                start_progress_poll(d.fields_dict.rebuild_progress.$wrapper);
+                                            }
+                                        });
                                     }
                                 },
                             });
@@ -306,12 +396,53 @@
         $('<button type="button" class="btn btn-default btn-sm">' + __("Preview") + "</button>")
             .prependTo($footer)
             .on("click", run_preview);
+        $('<button type="button" class="btn btn-default btn-sm">' + __("Refresh Progress") + "</button>")
+            .prependTo($footer)
+            .on("click", function () {
+                fetch_rebuild_progress(frm, d.fields_dict.rebuild_progress.$wrapper, function (prog) {
+                    if (prog.status === "running") {
+                        start_progress_poll(d.fields_dict.rebuild_progress.$wrapper);
+                    } else {
+                        stop_progress_poll();
+                    }
+                });
+            });
+        $('<button type="button" class="btn btn-warning btn-sm">' + __("Resume Rebuild") + "</button>")
+            .insertBefore($footer.find(".btn-modal-primary"))
+            .on("click", function () {
+                frappe.confirm(
+                    __("Resume the rebuild from the last saved position?"),
+                    function () {
+                        frappe.call({
+                            doc: frm.doc,
+                            method: "resume_product_map_rebuild",
+                            freeze: true,
+                            freeze_message: __("Resuming rebuild…"),
+                            callback: function (r) {
+                                if (!r.exc) {
+                                    fetch_rebuild_progress(frm, d.fields_dict.rebuild_progress.$wrapper, function (prog) {
+                                        if (prog.status === "running") {
+                                            start_progress_poll(d.fields_dict.rebuild_progress.$wrapper);
+                                        }
+                                    });
+                                }
+                            },
+                        });
+                    }
+                );
+            });
         $('<button type="button" class="btn btn-primary btn-sm">' + __("Run Test") + "</button>")
             .insertBefore($footer.find(".btn-modal-primary"))
             .on("click", run_test);
         $('<button type="button" class="btn btn-danger btn-sm">' + __("Rebuild All Maps") + "</button>")
             .insertBefore($footer.find(".btn-modal-primary"))
             .on("click", run_full_rebuild);
+
+        fetch_rebuild_progress(frm, d.fields_dict.rebuild_progress.$wrapper, function (prog) {
+            if (prog.status === "running") {
+                start_progress_poll(d.fields_dict.rebuild_progress.$wrapper);
+            }
+        });
 
         frappe.call({
             doc: frm.doc,
@@ -411,6 +542,21 @@
 
             frm.add_custom_button(__("Rebuild Product Maps"), function () {
                 open_product_map_rebuild_dialog(frm);
+            }, __("Products"));
+
+            frm.add_custom_button(__("Map Rebuild Progress"), function () {
+                frappe.call({
+                    doc: frm.doc,
+                    method: "get_product_map_rebuild_progress",
+                    callback: function (r) {
+                        var html = format_rebuild_progress_html(r.message || {});
+                        frappe.msgprint({
+                            title: __("Product Map Rebuild Progress"),
+                            message: html,
+                            wide: true,
+                        });
+                    },
+                });
             }, __("Products"));
 
             frm.add_custom_button(__("Sync Images Now"), function () {

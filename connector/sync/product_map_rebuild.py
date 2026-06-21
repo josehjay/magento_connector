@@ -6,6 +6,7 @@ Only writes ERPNext-side map rows and Item custom fields.
 """
 
 import frappe
+from frappe.utils import add_to_date, now_datetime
 from frappe.utils.background_jobs import is_job_enqueued
 from connector.api.magento_client import MagentoClient, MagentoAPIError
 from connector.connector.doctype.magento_product_map.magento_product_map import upsert_map
@@ -16,9 +17,14 @@ from connector.sync.product_sync import _get_allowed_item_groups
 TEST_PASSED_CACHE_KEY = "magento_product_map_rebuild_test_passed"
 TEST_PASSED_TTL_SEC = 86400
 
-FULL_REBUILD_JOB_NAME = "magento_full_product_map_rebuild"
+FULL_REBUILD_JOB_PREFIX = "magento_full_product_map_rebuild"
+REBUILD_ACTIVE_RUN_KEY = "magento_product_map_rebuild_active_run"
+REBUILD_PROGRESS_KEY_PREFIX = "magento_product_map_rebuild_progress"
+REBUILD_PROGRESS_TTL_SEC = 604800  # 7 days
+
 FULL_REBUILD_CHUNK_SIZE = 50
 FULL_REBUILD_CHUNK_TIMEOUT = 1800
+STALE_RUN_MINUTES = 45
 
 DEFAULT_TEST_SAMPLE_SIZE = 5
 MAX_TEST_SAMPLE_SIZE = 20
@@ -30,6 +36,10 @@ def _require_system_manager():
             "Only System Manager can rebuild product maps.",
             frappe.PermissionError,
         )
+
+
+def _progress_cache_key(run_id):
+    return f"{REBUILD_PROGRESS_KEY_PREFIX}:{run_id}"
 
 
 def _get_eligible_items():
@@ -61,36 +71,106 @@ def _get_map_state(item_code):
     )
 
 
+def _is_synced_map(map_row):
+    return bool(
+        map_row
+        and map_row.get("magento_product_id")
+        and map_row.get("sync_status") == "Synced"
+    )
+
+
+def _is_pending_not_in_magento(map_row):
+    """Set during full rebuild when Magento has no matching SKU."""
+    return bool(
+        map_row
+        and map_row.get("sync_status") == "Pending"
+        and not map_row.get("magento_product_id")
+    )
+
+
+def _items_needing_rebuild(*, include_pending=False):
+    """
+    Return ordered item codes that still need a map rebuild.
+    Excludes Pending rows (checked, not in Magento) unless include_pending=True.
+    """
+    items = _get_eligible_items()
+    ordered = []
+    for row in items:
+        item_code = row["item_code"]
+        map_row = _get_map_state(item_code)
+        if _is_synced_map(map_row):
+            continue
+        if not include_pending and _is_pending_not_in_magento(map_row):
+            continue
+        ordered.append(item_code)
+    return ordered
+
+
 def get_rebuild_preview():
     """Return counts and sample rows without calling Magento per item."""
     _require_system_manager()
 
     items = _get_eligible_items()
     mapped_ok = 0
+    pending_not_in_magento = 0
     needs_rebuild = []
     id_on_item_only = 0
 
     for row in items:
         item_code = row["item_code"]
         map_row = _get_map_state(item_code)
-        if map_row and map_row.get("magento_product_id") and map_row.get("sync_status") == "Synced":
+        if _is_synced_map(map_row):
             mapped_ok += 1
+        elif _is_pending_not_in_magento(map_row):
+            pending_not_in_magento += 1
         else:
             needs_rebuild.append(item_code)
             if row.get("magento_product_id") and not map_row:
                 id_on_item_only += 1
 
+    progress = get_rebuild_progress()
+
     return {
         "eligible_total": len(items),
         "already_mapped": mapped_ok,
+        "pending_not_in_magento": pending_not_in_magento,
         "needs_rebuild": len(needs_rebuild),
         "item_id_without_map": id_on_item_only,
         "sample_needs_rebuild": needs_rebuild[:10],
         "allowed_item_groups": list(_get_allowed_item_groups()) or None,
+        "active_rebuild": progress if progress.get("status") == "running" else None,
     }
 
 
-def rebuild_map_for_item(client, item_code, *, dry_run=False, skip_existing=True):
+def _record_not_in_magento(item_code):
+    """Mark item as checked; no matching SKU in Magento (does not modify Magento)."""
+    upsert_map(
+        item_code,
+        0,
+        item_code,
+        status="Pending",
+        retry_count=0,
+        last_failed_at=None,
+    )
+    if frappe.db.exists("Item", item_code):
+        frappe.db.set_value(
+            "Item",
+            item_code,
+            {
+                "magento_product_id": None,
+                "magento_sync_error": "No Magento product with SKU matching item_code (map rebuild)",
+            },
+        )
+
+
+def rebuild_map_for_item(
+    client,
+    item_code,
+    *,
+    dry_run=False,
+    skip_existing=True,
+    mark_not_in_magento=False,
+):
     """
     Restore one map entry by SKU lookup in Magento (GET only).
     Returns a result dict with status: mapped | skipped_existing |
@@ -103,29 +183,20 @@ def rebuild_map_for_item(client, item_code, *, dry_run=False, skip_existing=True
         "message": "",
     }
 
-    if skip_existing and not dry_run:
+    if skip_existing:
         map_row = _get_map_state(item_code)
-        if map_row and map_row.get("magento_product_id") and map_row.get("sync_status") == "Synced":
-            try:
-                if client.product_exists(item_code):
-                    product = client.get_product(item_code)
-                    magento_id = product.get("id")
-                    if magento_id and int(magento_id) == int(map_row.magento_product_id):
-                        result.update(
-                            status="skipped_existing",
-                            magento_product_id=magento_id,
-                            message="Already mapped with matching Magento product ID",
-                        )
-                        return result
-                    result["message"] = (
-                        f"Map ID {map_row.magento_product_id} differs from Magento ID {magento_id}; updating map"
-                    )
-            except MagentoAPIError as exc:
-                result["message"] = str(exc)
-                return result
+        if _is_synced_map(map_row):
+            result.update(
+                status="skipped_existing",
+                magento_product_id=map_row.magento_product_id,
+                message="Already mapped — skipped (no Magento API call)",
+            )
+            return result
 
     try:
         if not client.product_exists(item_code):
+            if mark_not_in_magento and not dry_run:
+                _record_not_in_magento(item_code)
             result.update(
                 status="skipped_not_in_magento",
                 message="No Magento product with SKU matching this item_code",
@@ -192,21 +263,17 @@ def rebuild_map_for_item(client, item_code, *, dry_run=False, skip_existing=True
         return result
 
 
-def _items_needing_rebuild():
-    preview = get_rebuild_preview()
-    items = _get_eligible_items()
-    needs = set()
-    for row in items:
-        map_row = _get_map_state(row["item_code"])
-        if not (map_row and map_row.get("magento_product_id") and map_row.get("sync_status") == "Synced"):
-            needs.add(row["item_code"])
-    ordered = [row["item_code"] for row in items if row["item_code"] in needs]
-    return ordered, preview
-
-
-def run_rebuild_batch(item_codes, *, dry_run=False, skip_existing=True):
+def run_rebuild_batch(
+    item_codes,
+    *,
+    dry_run=False,
+    skip_existing=True,
+    require_role=True,
+    mark_not_in_magento=False,
+):
     """Process a list of item codes; commit once at end unless dry_run."""
-    _require_system_manager()
+    if require_role:
+        _require_system_manager()
 
     if not item_codes:
         return {"results": [], "summary": _empty_summary()}
@@ -224,6 +291,7 @@ def run_rebuild_batch(item_codes, *, dry_run=False, skip_existing=True):
                 item_code,
                 dry_run=dry_run,
                 skip_existing=skip_existing,
+                mark_not_in_magento=mark_not_in_magento,
             )
         )
 
@@ -258,6 +326,11 @@ def _summarize_results(results):
     return summary
 
 
+def _merge_summary(progress, summary):
+    for key in ("mapped", "skipped_existing", "skipped_not_in_magento", "failed"):
+        progress[key] = (progress.get(key) or 0) + summary.get(key, 0)
+
+
 def _format_results_report(results, summary, *, title):
     lines = [f"=== {title} ===", ""]
     lines.append(
@@ -282,6 +355,76 @@ def _format_results_report(results, summary, *, title):
     return "\n".join(lines)
 
 
+def _save_progress(progress):
+    progress["last_updated"] = str(now_datetime())
+    frappe.cache().set_value(
+        _progress_cache_key(progress["run_id"]),
+        progress,
+        expires_in_sec=REBUILD_PROGRESS_TTL_SEC,
+    )
+    if progress.get("status") == "running":
+        frappe.cache().set_value(
+            REBUILD_ACTIVE_RUN_KEY,
+            progress["run_id"],
+            expires_in_sec=REBUILD_PROGRESS_TTL_SEC,
+        )
+    elif progress.get("status") in ("complete", "failed", "stopped"):
+        frappe.cache().delete_value(REBUILD_ACTIVE_RUN_KEY)
+
+
+def get_rebuild_progress(run_id=None):
+    """Return progress for the active or specified rebuild run."""
+    if not run_id:
+        run_id = frappe.cache().get_value(REBUILD_ACTIVE_RUN_KEY)
+    if not run_id:
+        return {"status": "idle"}
+    progress = frappe.cache().get_value(_progress_cache_key(run_id)) or {}
+    if not progress:
+        return {"status": "idle", "run_id": run_id}
+    progress.setdefault("run_id", run_id)
+    if progress.get("status") == "running" and _is_progress_stale(progress):
+        progress["status"] = "stale"
+        progress["message"] = (
+            "No progress update recently — the background worker may have stopped. "
+            "Use Resume Rebuild to continue."
+        )
+    total = progress.get("total") or 0
+    processed = progress.get("processed") or 0
+    progress["remaining"] = max(0, total - processed)
+    progress["percent"] = round((processed / total) * 100, 1) if total else 0
+    return progress
+
+
+def _is_progress_stale(progress):
+    last_updated = progress.get("last_updated")
+    if not last_updated:
+        return True
+    try:
+        cutoff = add_to_date(now_datetime(), minutes=-STALE_RUN_MINUTES)
+        return frappe.utils.get_datetime(last_updated) < cutoff
+    except Exception:
+        return False
+
+
+def _chunk_job_id(run_id, chunk_no):
+    return f"{FULL_REBUILD_JOB_PREFIX}_{run_id}_{chunk_no}"
+
+
+def _is_rebuild_job_running(run_id=None):
+    """True if any chunk job for the active run is queued or running."""
+    if not run_id:
+        run_id = frappe.cache().get_value(REBUILD_ACTIVE_RUN_KEY)
+    if not run_id:
+        return False
+    progress = frappe.cache().get_value(_progress_cache_key(run_id)) or {}
+    chunk_no = progress.get("next_chunk") or 0
+    # Current or next chunk may be in queue
+    for n in range(max(0, chunk_no - 1), chunk_no + 2):
+        if is_job_enqueued(_chunk_job_id(run_id, n)):
+            return True
+    return False
+
+
 def test_rebuild_product_maps(sample_size=None, dry_run=False):
     """
     Pilot rebuild on a small sample (default 5 items).
@@ -299,7 +442,7 @@ def test_rebuild_product_maps(sample_size=None, dry_run=False):
         frappe.throw(f"Magento connection check failed: {exc}")
 
     preview = get_rebuild_preview()
-    candidates, _ = _items_needing_rebuild()
+    candidates = _items_needing_rebuild()
     if not candidates:
         frappe.throw(
             "No items need map rebuild. All eligible items already have synced map entries.",
@@ -345,7 +488,7 @@ def _mark_test_passed(summary, sample_size):
         TEST_PASSED_CACHE_KEY,
         {
             "user": frappe.session.user,
-            "at": str(frappe.utils.now_datetime()),
+            "at": str(now_datetime()),
             "mapped": summary.get("mapped", 0),
             "sample_size": sample_size,
             "failed": summary.get("failed", 0),
@@ -377,28 +520,88 @@ def clear_test_passed():
     frappe.cache().delete_value(TEST_PASSED_CACHE_KEY)
 
 
-def trigger_full_product_map_rebuild(*, confirm_phrase="", force=False):
+def _init_rebuild_run(candidates):
+    run_id = frappe.generate_hash(length=12)
+    progress = {
+        "run_id": run_id,
+        "status": "running",
+        "started_at": str(now_datetime()),
+        "started_by": frappe.session.user,
+        "total": len(candidates),
+        "processed": 0,
+        "offset": 0,
+        "mapped": 0,
+        "skipped_existing": 0,
+        "skipped_not_in_magento": 0,
+        "failed": 0,
+        "chunks_completed": 0,
+        "next_chunk": 0,
+        "item_codes": candidates,
+        "message": f"Queued — {len(candidates)} item(s) to process.",
+        "last_error": None,
+    }
+    _save_progress(progress)
+    return progress
+
+
+def _enqueue_rebuild_chunk(run_id, chunk_no):
+    frappe.enqueue(
+        "connector.sync.product_map_rebuild.run_full_rebuild_chunk",
+        queue="long",
+        timeout=FULL_REBUILD_CHUNK_TIMEOUT,
+        job_id=_chunk_job_id(run_id, chunk_no),
+        deduplicate=False,
+        enqueue_after_commit=True,
+        run_id=run_id,
+        chunk_no=chunk_no,
+    )
+
+
+def trigger_full_product_map_rebuild(*, confirm_phrase="", force=False, resume=False):
     """
     Enqueue background rebuild for all items still missing maps.
-    Requires a successful test run by the current user unless force=True (System Manager).
+    Requires a successful test run by the current user unless force=True.
     """
     _require_system_manager()
 
-    if confirm_phrase != "REBUILD MAPS":
+    if not resume and confirm_phrase != "REBUILD MAPS":
         frappe.throw(
             'Type exactly "REBUILD MAPS" in the confirmation field to proceed.',
             title="Confirmation Required",
         )
 
-    if not force and not _test_passed_for_current_user():
+    if not resume and not force and not _test_passed_for_current_user():
         frappe.throw(
-            "Run a successful test rebuild (5 items) before rebuilding all maps, "
-            "or contact an administrator.",
+            "Run a successful test rebuild (5 items) before rebuilding all maps.",
             title="Test Required",
         )
 
+    progress = get_rebuild_progress()
+    if progress.get("status") == "running" and _is_rebuild_job_running(progress.get("run_id")):
+        frappe.throw(
+            "A full product map rebuild is already running. Check progress below.",
+            title="Job Already Running",
+        )
+
+    if resume and progress.get("run_id") and progress.get("status") in ("running", "stale", "failed"):
+        run_id = progress["run_id"]
+        chunk_no = progress.get("next_chunk") or progress.get("chunks_completed") or 0
+        progress["status"] = "running"
+        progress["message"] = "Resuming rebuild…"
+        progress["last_error"] = None
+        _save_progress(progress)
+        _enqueue_rebuild_chunk(run_id, chunk_no)
+        return {
+            "queued": True,
+            "run_id": run_id,
+            "resumed": True,
+            "message": f"Resumed rebuild at item {progress.get('processed', 0)} of {progress.get('total', 0)}.",
+            "progress": get_rebuild_progress(run_id),
+        }
+
     preview = get_rebuild_preview()
-    if preview["needs_rebuild"] == 0:
+    candidates = _items_needing_rebuild()
+    if not candidates:
         frappe.msgprint(
             "All eligible items already have product map entries. Nothing to rebuild.",
             indicator="green",
@@ -406,54 +609,101 @@ def trigger_full_product_map_rebuild(*, confirm_phrase="", force=False):
         )
         return {"queued": False, "preview": preview}
 
-    if is_job_enqueued(FULL_REBUILD_JOB_NAME):
-        frappe.throw(
-            "A full product map rebuild is already running. Wait for it to finish.",
-            title="Job Already Running",
-        )
-
-    frappe.enqueue(
-        "connector.sync.product_map_rebuild.run_full_rebuild_chunk",
-        queue="long",
-        timeout=FULL_REBUILD_CHUNK_TIMEOUT,
-        job_id=FULL_REBUILD_JOB_NAME,
-        deduplicate=True,
-        enqueue_after_commit=True,
-    )
+    progress = _init_rebuild_run(candidates)
+    _enqueue_rebuild_chunk(progress["run_id"], 0)
 
     return {
         "queued": True,
+        "run_id": progress["run_id"],
         "preview": preview,
-        "message": f"Queued rebuild for {preview['needs_rebuild']} item(s) in background.",
+        "progress": get_rebuild_progress(progress["run_id"]),
+        "message": (
+            f"Queued rebuild for {len(candidates)} item(s) in background. "
+            f"({preview.get('already_mapped', 0)} already mapped.)"
+        ),
     }
 
 
-def run_full_rebuild_chunk():
-    """Process one chunk of unmapped items; re-enqueue if more remain."""
-    candidates, _preview = _items_needing_rebuild()
-    if not candidates:
-        frappe.logger("connector").info("run_full_rebuild_chunk: nothing left to rebuild.")
-        clear_test_passed()
+def run_full_rebuild_chunk(run_id=None, chunk_no=0):
+    """Process one chunk of the active rebuild run; enqueue the next chunk if more remain."""
+    logger = frappe.logger("connector")
+
+    if not run_id:
+        run_id = frappe.cache().get_value(REBUILD_ACTIVE_RUN_KEY)
+    if not run_id:
+        logger.warning("run_full_rebuild_chunk: no active run_id.")
         return
 
-    chunk = candidates[:FULL_REBUILD_CHUNK_SIZE]
-    remaining = len(candidates) - len(chunk)
+    progress = frappe.cache().get_value(_progress_cache_key(run_id)) or {}
+    if not progress or progress.get("status") not in ("running", None):
+        logger.info(f"run_full_rebuild_chunk: run {run_id} is not active.")
+        return
 
-    frappe.logger("connector").info(
-        f"run_full_rebuild_chunk: processing {len(chunk)} items ({remaining} remaining)."
+    item_codes = progress.get("item_codes") or []
+    offset = progress.get("offset") or 0
+    chunk = item_codes[offset : offset + FULL_REBUILD_CHUNK_SIZE]
+
+    if not chunk:
+        progress["status"] = "complete"
+        progress["message"] = (
+            f"Complete — {progress.get('mapped', 0)} mapped, "
+            f"{progress.get('skipped_not_in_magento', 0)} not in Magento, "
+            f"{progress.get('failed', 0)} failed."
+        )
+        _save_progress(progress)
+        clear_test_passed()
+        logger.info(f"run_full_rebuild_chunk: run {run_id} complete.")
+        return
+
+    remaining = len(item_codes) - offset - len(chunk)
+    progress["message"] = (
+        f"Processing items {offset + 1}–{offset + len(chunk)} of {len(item_codes)} "
+        f"({remaining} remaining after this chunk)…"
+    )
+    _save_progress(progress)
+
+    logger.info(
+        f"run_full_rebuild_chunk: run={run_id} chunk={chunk_no} "
+        f"items {offset + 1}-{offset + len(chunk)} of {len(item_codes)}."
     )
 
-    run_rebuild_batch(chunk, dry_run=False, skip_existing=True)
+    try:
+        outcome = run_rebuild_batch(
+            chunk,
+            dry_run=False,
+            skip_existing=True,
+            require_role=False,
+            mark_not_in_magento=True,
+        )
+        summary = outcome["summary"]
+        _merge_summary(progress, summary)
+        progress["processed"] = (progress.get("processed") or 0) + len(chunk)
+        progress["offset"] = offset + len(chunk)
+        progress["chunks_completed"] = (progress.get("chunks_completed") or 0) + 1
+        progress["next_chunk"] = chunk_no + 1
+        progress["last_error"] = None
+        _save_progress(progress)
+    except Exception as exc:
+        frappe.log_error(frappe.get_traceback(), "Product Map Rebuild Chunk Failed")
+        progress["last_error"] = str(exc)[:500]
+        progress["status"] = "failed"
+        progress["message"] = f"Chunk {chunk_no} failed: {exc}"
+        _save_progress(progress)
+        raise
 
-    if remaining > 0:
-        frappe.enqueue(
-            "connector.sync.product_map_rebuild.run_full_rebuild_chunk",
-            queue="long",
-            timeout=FULL_REBUILD_CHUNK_TIMEOUT,
-            job_id=FULL_REBUILD_JOB_NAME,
-            deduplicate=True,
-            enqueue_after_commit=True,
+    if progress["offset"] < len(item_codes):
+        _enqueue_rebuild_chunk(run_id, chunk_no + 1)
+        logger.info(
+            f"run_full_rebuild_chunk: enqueued chunk {chunk_no + 1} "
+            f"({len(item_codes) - progress['offset']} items left)."
         )
     else:
+        progress["status"] = "complete"
+        progress["message"] = (
+            f"Complete — {progress.get('mapped', 0)} mapped, "
+            f"{progress.get('skipped_not_in_magento', 0)} not in Magento, "
+            f"{progress.get('failed', 0)} failed."
+        )
+        _save_progress(progress)
         clear_test_passed()
-        frappe.logger("connector").info("run_full_rebuild_chunk: complete.")
+        logger.info(f"run_full_rebuild_chunk: run {run_id} complete.")

@@ -358,9 +358,22 @@ class MagentoSettings(Document):
             "",
             f"Eligible items (sync_to_magento=1): {preview['eligible_total']}",
             f"Already mapped (synced):            {preview['already_mapped']}",
+            f"Checked — not in Magento (Pending): {preview.get('pending_not_in_magento', 0)}",
             f"Need map rebuild:                   {preview['needs_rebuild']}",
             f"Item has magento_product_id but no map row: {preview['item_id_without_map']}",
         ]
+        active = preview.get("active_rebuild")
+        if active and active.get("status") in ("running", "stale"):
+            lines.extend([
+                "",
+                "=== ACTIVE REBUILD ===",
+                f"Status:    {active.get('status')}",
+                f"Progress:  {active.get('processed', 0)} / {active.get('total', 0)} ({active.get('percent', 0)}%)",
+                f"Mapped:    {active.get('mapped', 0)}",
+                f"Not in MG: {active.get('skipped_not_in_magento', 0)}",
+                f"Failed:    {active.get('failed', 0)}",
+                f"Message:   {active.get('message') or '—'}",
+            ])
         if preview.get("allowed_item_groups"):
             lines.append(f"Item group filter active: {', '.join(preview['allowed_item_groups'])}")
         else:
@@ -428,6 +441,28 @@ class MagentoSettings(Document):
         return get_test_passed_status()
 
     @frappe.whitelist()
+    def get_product_map_rebuild_progress(self):
+        """Return live progress for the active or last rebuild run."""
+        from connector.sync.product_map_rebuild import get_rebuild_progress
+
+        progress = get_rebuild_progress()
+        return progress
+
+    @frappe.whitelist()
+    def resume_product_map_rebuild(self):
+        """Resume a stalled or failed rebuild from the last saved offset."""
+        from connector.sync.product_map_rebuild import trigger_full_product_map_rebuild
+
+        result = trigger_full_product_map_rebuild(resume=True)
+        if result.get("queued"):
+            frappe.msgprint(
+                result.get("message") or "Rebuild resumed.",
+                indicator="blue",
+                title="Rebuild Resumed",
+            )
+        return result
+
+    @frappe.whitelist()
     def trigger_full_product_map_rebuild(self, confirm_phrase=""):
         """
         Rebuild all missing product maps in the background.
@@ -437,11 +472,11 @@ class MagentoSettings(Document):
 
         result = trigger_full_product_map_rebuild(confirm_phrase=confirm_phrase or "")
         if result.get("queued"):
-            frappe.msgprint(
-                result.get("message") or "Full product map rebuild queued.",
-                indicator="blue",
-                title="Rebuild Queued",
-            )
+            prog = result.get("progress") or {}
+            msg = result.get("message") or "Full product map rebuild queued."
+            if prog.get("total"):
+                msg += f" Track progress: {prog.get('processed', 0)}/{prog.get('total')} processed."
+            frappe.msgprint(msg, indicator="blue", title="Rebuild Queued")
         return result
 
     @frappe.whitelist()
