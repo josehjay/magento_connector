@@ -103,6 +103,235 @@
         });
     }
 
+    // ── Product map rebuild (read-only Magento) ───────────────────────────
+
+    function open_product_map_rebuild_dialog(frm) {
+        var test_passed = false;
+
+        var precautions_html =
+            "<div style='font-size:12px;line-height:1.5'>" +
+            "<p><strong>What this does</strong></p>" +
+            "<ul>" +
+            "<li>Reads existing Magento products by SKU (GET only) — <strong>does not change Magento</strong></li>" +
+            "<li>Recreates <em>Magento Product Map</em> rows and Item <em>magento_product_id</em> in ERPNext</li>" +
+            "<li>Only items with <em>Sync to Magento</em> checked are included</li>" +
+            "</ul>" +
+            "<p><strong>Precautions</strong></p>" +
+            "<ul>" +
+            "<li>Run <em>Test Connection</em> first</li>" +
+            "<li>SKU in Magento must match ERPNext <em>item_code</em> exactly</li>" +
+            "<li>Test with 5 items before rebuilding all maps</li>" +
+            "<li>This is <strong>not</strong> a product push — use <em>Sync All Products Now</em> only if ERPNext should overwrite Magento data</li>" +
+            "<li>Only System Manager can run rebuild</li>" +
+            "</ul>" +
+            "</div>";
+
+        var d = new frappe.ui.Dialog({
+            title: __("Rebuild Product Maps from Magento"),
+            size: "large",
+            fields: [
+                {
+                    fieldtype: "HTML",
+                    fieldname: "precautions",
+                    options: precautions_html,
+                },
+                {
+                    fieldtype: "Section Break",
+                    label: __("Step 1 — Preview"),
+                },
+                {
+                    fieldtype: "HTML",
+                    fieldname: "preview_result",
+                    options: "<p class='text-muted'>" + __("Click Preview below to see how many items need rebuild.") + "</p>",
+                },
+                {
+                    fieldtype: "Section Break",
+                    label: __("Step 2 — Test (sample)"),
+                },
+                {
+                    fieldtype: "Int",
+                    fieldname: "sample_size",
+                    label: __("Test sample size"),
+                    default: 5,
+                    description: __("Number of items to rebuild in the pilot test (1–20)."),
+                },
+                {
+                    fieldtype: "Check",
+                    fieldname: "dry_run",
+                    label: __("Dry run only (no ERPNext changes)"),
+                    default: 0,
+                    description: __("Check to verify Magento lookups without writing map rows."),
+                },
+                {
+                    fieldtype: "HTML",
+                    fieldname: "test_status",
+                    options: "<p class='text-muted'>" + __("Run test after preview.") + "</p>",
+                },
+                {
+                    fieldtype: "Section Break",
+                    label: __("Step 3 — Rebuild all"),
+                },
+                {
+                    fieldtype: "Data",
+                    fieldname: "confirm_phrase",
+                    label: __('Type "REBUILD MAPS" to confirm full rebuild'),
+                    description: __("Required after a successful test run (valid 24 hours)."),
+                },
+            ],
+            primary_action_label: __("Close"),
+            primary_action: function () {
+                d.hide();
+            },
+        });
+
+        function run_preview() {
+            frappe.call({
+                doc: frm.doc,
+                method: "preview_product_map_rebuild",
+                freeze: true,
+                freeze_message: __("Analyzing eligible items…"),
+            });
+        }
+
+        function run_test() {
+            var values = d.get_values();
+            if (!values) return;
+
+            var sample_size = parseInt(values.sample_size, 10) || 5;
+            if (sample_size < 1 || sample_size > 20) {
+                frappe.msgprint(__("Sample size must be between 1 and 20."));
+                return;
+            }
+
+            var msg = values.dry_run
+                ? __("Run dry-run test on {0} item(s)? No ERPNext data will change.", [sample_size])
+                : __("Run test rebuild on {0} item(s)? This writes map rows in ERPNext only.", [sample_size]);
+
+            frappe.confirm(msg, function () {
+                frappe.call({
+                    doc: frm.doc,
+                    method: "test_rebuild_product_maps",
+                    args: {
+                        sample_size: sample_size,
+                        dry_run: values.dry_run ? 1 : 0,
+                    },
+                    freeze: true,
+                    freeze_message: __("Testing product map rebuild…"),
+                    callback: function (r) {
+                        if (r.exc || !r.message) return;
+                        var res = r.message;
+                        test_passed = !!res.test_passed && !res.dry_run;
+                        var s = res.summary || {};
+                        var status_html =
+                            "<p><strong>" + __("Test summary") + "</strong></p>" +
+                            "<ul>" +
+                            "<li>" + __("Mapped") + ": " + (s.mapped || 0) + "</li>" +
+                            "<li>" + __("Skipped (already mapped)") + ": " + (s.skipped_existing || 0) + "</li>" +
+                            "<li>" + __("Skipped (not in Magento)") + ": " + (s.skipped_not_in_magento || 0) + "</li>" +
+                            "<li>" + __("Failed") + ": " + (s.failed || 0) + "</li>" +
+                            "</ul>";
+                        if (res.test_passed && !res.dry_run) {
+                            status_html += "<p class='text-success'>" +
+                                __("Test passed — full rebuild is unlocked for 24 hours.") + "</p>";
+                        } else if (res.dry_run) {
+                            status_html += "<p class='text-muted'>" +
+                                __("Dry run complete. Uncheck dry run and run again to write maps.") + "</p>";
+                        } else if ((s.failed || 0) > 0) {
+                            status_html += "<p class='text-danger'>" +
+                                __("Test did not pass. Fix failures before rebuilding all maps.") + "</p>";
+                        }
+                        d.fields_dict.test_status.$wrapper.html(status_html);
+                    },
+                });
+            });
+        }
+
+        function run_full_rebuild() {
+            frappe.call({
+                doc: frm.doc,
+                method: "get_product_map_rebuild_status",
+                callback: function (status_r) {
+                    var status = (status_r.message || {});
+                    if (!status.passed && !test_passed) {
+                        frappe.msgprint({
+                            title: __("Test Required"),
+                            message: __(
+                                "Run a successful test rebuild (5 items, no failures) before rebuilding all maps."
+                            ),
+                            indicator: "orange",
+                        });
+                        return;
+                    }
+
+                    var values = d.get_values();
+                    if (!values) return;
+
+                    if ((values.confirm_phrase || "").trim() !== "REBUILD MAPS") {
+                        frappe.msgprint({
+                            title: __("Confirmation Required"),
+                            message: __('Type exactly "REBUILD MAPS" in the confirmation field.'),
+                            indicator: "orange",
+                        });
+                        return;
+                    }
+
+                    frappe.confirm(
+                        __(
+                            "Queue a background rebuild for all items missing product maps? " +
+                            "Magento is read-only; only ERPNext map rows are created."
+                        ),
+                        function () {
+                            frappe.call({
+                                doc: frm.doc,
+                                method: "trigger_full_product_map_rebuild",
+                                args: { confirm_phrase: values.confirm_phrase.trim() },
+                                freeze: true,
+                                freeze_message: __("Queueing full rebuild…"),
+                                callback: function (r) {
+                                    if (!r.exc) {
+                                        d.hide();
+                                    }
+                                },
+                            });
+                        }
+                    );
+                },
+            });
+        }
+
+        d.show();
+
+        var $footer = d.$wrapper.find(".modal-footer");
+        $footer.find(".btn-modal-secondary").remove();
+        $('<button type="button" class="btn btn-default btn-sm">' + __("Preview") + "</button>")
+            .prependTo($footer)
+            .on("click", run_preview);
+        $('<button type="button" class="btn btn-primary btn-sm">' + __("Run Test") + "</button>")
+            .insertBefore($footer.find(".btn-modal-primary"))
+            .on("click", run_test);
+        $('<button type="button" class="btn btn-danger btn-sm">' + __("Rebuild All Maps") + "</button>")
+            .insertBefore($footer.find(".btn-modal-primary"))
+            .on("click", run_full_rebuild);
+
+        frappe.call({
+            doc: frm.doc,
+            method: "get_product_map_rebuild_status",
+            callback: function (r) {
+                if (r.message && r.message.passed) {
+                    test_passed = true;
+                    d.fields_dict.test_status.$wrapper.html(
+                        "<p class='text-success'>" +
+                        __("Prior test passed by {0} at {1}. Full rebuild is available.", [
+                            r.message.user,
+                            r.message.at || "—",
+                        ]) +
+                        "</p>"
+                    );
+                }
+            },
+        });
+    }
+
     // ── Main form handler ─────────────────────────────────────────────────
 
     frappe.ui.form.on("Magento Settings", {
@@ -178,6 +407,10 @@
                         },
                     });
                 });
+            }, __("Products"));
+
+            frm.add_custom_button(__("Rebuild Product Maps"), function () {
+                open_product_map_rebuild_dialog(frm);
             }, __("Products"));
 
             frm.add_custom_button(__("Sync Images Now"), function () {

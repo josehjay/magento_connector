@@ -342,6 +342,109 @@ class MagentoSettings(Document):
         frappe.msgprint("Full product sync has been queued.", indicator="blue")
 
     @frappe.whitelist()
+    def preview_product_map_rebuild(self):
+        """
+        Show how many items need map rebuild without modifying data or
+        calling Magento per item.
+        """
+        from connector.sync.product_map_rebuild import get_rebuild_preview
+
+        preview = get_rebuild_preview()
+        lines = [
+            "=== PRODUCT MAP REBUILD PREVIEW ===",
+            "",
+            "This tool restores ERPNext Magento Product Map rows by reading",
+            "existing Magento products (GET only). Magento catalog data is NOT modified.",
+            "",
+            f"Eligible items (sync_to_magento=1): {preview['eligible_total']}",
+            f"Already mapped (synced):            {preview['already_mapped']}",
+            f"Need map rebuild:                   {preview['needs_rebuild']}",
+            f"Item has magento_product_id but no map row: {preview['item_id_without_map']}",
+        ]
+        if preview.get("allowed_item_groups"):
+            lines.append(f"Item group filter active: {', '.join(preview['allowed_item_groups'])}")
+        else:
+            lines.append("Item group filter: (none — all groups eligible)")
+        lines.append("")
+        if preview["sample_needs_rebuild"]:
+            lines.append("Sample items needing rebuild:")
+            for code in preview["sample_needs_rebuild"]:
+                lines.append(f"  • {code}")
+        else:
+            lines.append("No items need rebuild.")
+        lines.extend([
+            "",
+            "Recommended steps:",
+            "  1. Test Connection (verify Magento API)",
+            "  2. Run test rebuild on 5 items and verify results",
+            "  3. Rebuild all maps (background job)",
+        ])
+        return _show_report(lines, "Product Map Rebuild Preview")
+
+    @frappe.whitelist()
+    def test_rebuild_product_maps(self, sample_size=5, dry_run=0):
+        """
+        Pilot map rebuild on a small sample. On success, unlocks full rebuild
+        for the current user for 24 hours.
+        """
+        from connector.sync.product_map_rebuild import test_rebuild_product_maps
+
+        result = test_rebuild_product_maps(
+            sample_size=int(sample_size or 5),
+            dry_run=bool(int(dry_run or 0)),
+        )
+        indicator = "green" if result.get("test_passed") else "orange"
+        title = "Test Passed" if result.get("test_passed") else "Test Completed With Issues"
+        if result.get("dry_run"):
+            title = "Dry Run Complete"
+        frappe.msgprint(
+            f"<pre style='white-space:pre-wrap;font-size:12px;max-height:500px;overflow:auto'>"
+            f"{frappe.utils.escape_html(result.get('report') or '')}</pre>",
+            title=title,
+            indicator=indicator,
+            wide=True,
+        )
+        if result.get("test_passed") and not result.get("dry_run"):
+            frappe.msgprint(
+                "Test passed with zero failures. You may now run <b>Rebuild All Product Maps</b> "
+                "within the next 24 hours.",
+                indicator="green",
+                title="Full Rebuild Unlocked",
+            )
+        elif not result.get("test_passed"):
+            frappe.msgprint(
+                "Test did not pass. Ensure at least one item maps successfully, fix API failures, "
+                "or verify SKUs match between ERPNext item_code and Magento.",
+                indicator="red",
+                title="Test Did Not Pass",
+            )
+        return result
+
+    @frappe.whitelist()
+    def get_product_map_rebuild_status(self):
+        """Return whether the current user has passed the test rebuild gate."""
+        from connector.sync.product_map_rebuild import get_test_passed_status
+
+        return get_test_passed_status()
+
+    @frappe.whitelist()
+    def trigger_full_product_map_rebuild(self, confirm_phrase=""):
+        """
+        Rebuild all missing product maps in the background.
+        Requires confirm_phrase='REBUILD MAPS' and a prior successful test run.
+        """
+        from connector.sync.product_map_rebuild import trigger_full_product_map_rebuild
+
+        result = trigger_full_product_map_rebuild(confirm_phrase=confirm_phrase or "")
+        if result.get("queued"):
+            frappe.msgprint(
+                result.get("message") or "Full product map rebuild queued.",
+                indicator="blue",
+                title="Rebuild Queued",
+            )
+        return result
+
+    @frappe.whitelist()
     def trigger_order_sync(self):
         """Manually enqueue an order sync."""
         frappe.enqueue(
