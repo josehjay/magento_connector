@@ -27,7 +27,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Operation",
-   "options": "Product Push\nInventory Push\nOrder Pull\nImage Sync\nStatus Sync\nCustomer Sync\nERPNext Product Push",
+   "options": "Product Push\nInventory Push\nOrder Pull\nImage Sync\nStatus Sync\nCustomer Sync\nERPNext Product Push\nProduct Map Rebuild\nRemove from Magento\nAttribute Map",
    "reqd": 1
   },
   {

@@ -55,6 +55,11 @@ doc_events = {
         "on_update": "connector.sync.product_sync.on_item_price_change",
         "on_trash": "connector.sync.product_sync.on_item_price_change",
     },
+    # Only acts on Item Attributes that are already mapped to Magento — pushes
+    # newly-added values as new Magento options (additive only, never deletes).
+    "Item Attribute": {
+        "on_update": "connector.sync.attribute_sync.on_item_attribute_save",
+    },
     "Sales Order": {
         # on_submit → Magento "processing" (order confirmed in ERP)
         "on_submit": "connector.sync.status_sync.on_sales_order_submit",
@@ -98,6 +103,11 @@ scheduler_events = {
         "*/30 * * * *": [
             "connector.tasks.sync_images",
             "connector.tasks.retry_failed_product_sync",
+        ],
+        # Push newly-added values for already-mapped attributes every hour
+        # (catch-up for the real-time hook; never touches unmapped attributes).
+        "0 * * * *": [
+            "connector.tasks.sync_attribute_options",
         ],
     }
 }

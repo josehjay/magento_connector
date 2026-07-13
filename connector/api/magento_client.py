@@ -741,3 +741,76 @@ class MagentoClient:
             for x in items
             if x.get("attribute_code")
         ]
+
+    # ------------------------------------------------------------------
+    # Product attributes (EAV) — create/map + additive-only options
+    # ------------------------------------------------------------------
+
+    def get_attribute(self, attribute_code):
+        """GET /V1/products/attributes/{attributeCode} — full attribute definition."""
+        return self.get(f"/products/attributes/{requests.utils.quote(attribute_code, safe='')}")
+
+    def attribute_exists(self, attribute_code):
+        """Return True if a Magento product attribute with this code exists."""
+        try:
+            self.get_attribute(attribute_code)
+            return True
+        except MagentoAPIError as e:
+            if e.status_code == 404:
+                return False
+            raise
+
+    def create_attribute(self, payload):
+        """
+        POST /V1/products/attributes — create a new EAV product attribute.
+        `payload` may include an initial "options" list (each {"label": ...})
+        so the attribute is created with its full option set in one call.
+        """
+        return self.post("/products/attributes", data={"attribute": payload})
+
+    def get_attribute_options(self, attribute_code):
+        """
+        GET /V1/products/attributes/{attributeCode}/options
+        Returns the full list of {label, value, ...} options already defined
+        in Magento for this attribute (read-only — does not modify anything).
+        """
+        result = self.get(f"/products/attributes/{requests.utils.quote(attribute_code, safe='')}/options")
+        return result if isinstance(result, list) else []
+
+    def add_attribute_option(self, attribute_code, label, sort_order=0):
+        """
+        POST /V1/products/attributes/{attributeCode}/options — add ONE new option.
+        This call is purely additive: Magento's options endpoint only ever adds
+        a new option here and never removes or edits any existing one.
+        """
+        return self.post(
+            f"/products/attributes/{requests.utils.quote(attribute_code, safe='')}/options",
+            data={"option": {"label": label, "sort_order": sort_order}},
+        )
+
+    def get_attribute_set_groups(self, attribute_set_id):
+        """GET /V1/products/attribute-sets/{attributeSetId}/groups"""
+        try:
+            result = self.get(f"/products/attribute-sets/{int(attribute_set_id)}/groups")
+        except MagentoAPIError:
+            return []
+        return result if isinstance(result, list) else []
+
+    def add_attribute_to_set(self, attribute_set_id, attribute_group_id, attribute_code, sort_order=0):
+        """
+        POST /V1/products/attribute-sets/attributes — assign an existing attribute
+        to an attribute set + group so it becomes usable/selectable on products in
+        that set. Additive only: this never removes the attribute from any other
+        set or group it's already assigned to. Magento returns a 400 if the
+        attribute is already assigned to this set — callers should treat that as
+        a no-op success rather than a failure.
+        """
+        return self.post(
+            "/products/attribute-sets/attributes",
+            data={
+                "attributeSetId": int(attribute_set_id),
+                "attributeGroupId": int(attribute_group_id),
+                "attributeCode": attribute_code,
+                "sortOrder": sort_order,
+            },
+        )

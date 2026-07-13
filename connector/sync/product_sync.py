@@ -141,8 +141,13 @@ def _backoff_minutes(retry_count):
 def _get_variant_attributes(item_code):
     """
     Return list of {attribute_code, value} for an Item variant from Item Variant Attribute.
-    attribute_code is derived from Item Attribute name (lowercase, spaces to underscores)
-    for use as Magento custom_attributes / configurable option.
+
+    attribute_code is resolved from the Magento Attribute Mapping for the ERPNext
+    Item Attribute (e.g. "Size" -> "size") when one exists, so it matches the
+    actual Magento attribute created/mapped via the attribute sync tool. Falls
+    back to a naive slug (lowercase, spaces to underscores) for attributes that
+    haven't been mapped yet, so pushes don't fail outright — map the attribute
+    in Magento Settings to get the real, usable configurable option.
     """
     if not frappe.db.table_exists("Item Variant Attribute"):
         return []
@@ -153,15 +158,31 @@ def _get_variant_attributes(item_code):
     )
     out = []
     for row in rows:
-        if not row.get("attribute"):
+        item_attribute = (row.get("attribute") or "").strip()
+        if not item_attribute:
             continue
-        # ERPNext "attribute" is the Item Attribute name (e.g. "Size", "Color")
-        code = (row.get("attribute") or "").strip().lower().replace(" ", "_")
+        code = _resolve_magento_attribute_code(item_attribute)
         if not code:
             continue
         value = (row.get("attribute_value") or "").strip()
         out.append({"attribute_code": code, "value": value or ""})
     return out
+
+
+def _resolve_magento_attribute_code(item_attribute):
+    """
+    Return the mapped Magento attribute_code for an ERPNext Item Attribute
+    (via Magento Attribute Mapping), or a naive slug fallback if it hasn't
+    been mapped/created in Magento yet.
+    """
+    from connector.connector.doctype.magento_attribute_mapping.magento_attribute_mapping import (
+        get_magento_attribute_code,
+    )
+
+    mapped_code = get_magento_attribute_code(item_attribute)
+    if mapped_code:
+        return mapped_code
+    return item_attribute.strip().lower().replace(" ", "_")
 
 
 def _build_product_payload(doc):
@@ -170,6 +191,13 @@ def _build_product_payload(doc):
     - Template (has_variants): type_id configurable.
     - Variant (variant_of): type_id simple, with variant attributes in custom_attributes.
     Attribute set from Magento Settings → Item Group. Stock via inventory_sync.
+
+    ERPNext is the sole source of truth for name/price: this payload always
+    carries ERPNext's current item_name/price and is pushed on every sync, so
+    Magento's copy is kept in lockstep with ERPNext rather than the reverse.
+    Nothing in this app ever pulls name/price back from Magento into ERPNext —
+    keep it that way; if Magento and ERPNext disagree on name/price, the next
+    push overwrites Magento with ERPNext's value.
     """
     settings = frappe.get_single("Magento Settings")
     price = _get_item_price(doc.item_code, settings.price_list)
@@ -214,6 +242,51 @@ def _build_product_payload(doc):
         payload["weight"] = float(doc.weight_per_unit)
 
     return payload
+
+
+def _merge_preserving_magento_only_data(existing_product, payload):
+    """
+    Overlay our ERPNext-driven payload onto the product Magento already has,
+    so fields Magento manages and ERPNext knows nothing about — category
+    assignments, images/media gallery, and any custom attributes we don't
+    explicitly set — are carried through untouched rather than wiped by a
+    partial PUT.
+
+    This matters because Magento's product REST API does not merge
+    `extension_attributes`: a PUT that includes `extension_attributes` (e.g.
+    just `stock_item`) can silently clear `category_links` and other
+    extension data that isn't repeated in the request. `custom_attributes`
+    is safer (Magento merges by attribute_code) but we still merge explicitly
+    here rather than rely on that behavior.
+
+    ERPNext-owned fields (name, price, status, visibility, type_id,
+    attribute_set_id, weight, and the custom_attributes/extension_attributes
+    keys we manage) always win. Everything else Magento already has for this
+    product is preserved as-is.
+    """
+    if not existing_product:
+        return payload
+
+    merged = dict(existing_product)
+    merged.update({
+        k: v for k, v in payload.items()
+        if k not in ("custom_attributes", "extension_attributes")
+    })
+
+    existing_custom = {
+        attr.get("attribute_code"): attr
+        for attr in (existing_product.get("custom_attributes") or [])
+        if attr.get("attribute_code")
+    }
+    for attr in payload.get("custom_attributes") or []:
+        existing_custom[attr["attribute_code"]] = attr
+    merged["custom_attributes"] = list(existing_custom.values())
+
+    existing_extension_attributes = dict(existing_product.get("extension_attributes") or {})
+    existing_extension_attributes.update(payload.get("extension_attributes") or {})
+    merged["extension_attributes"] = existing_extension_attributes
+
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -403,14 +476,19 @@ def push_item_to_magento(item_code):
         return
 
     payload = _build_product_payload(doc)
-    existing_magento_id = get_magento_product_id(item_code)
 
     try:
         client = MagentoClient()
 
-        if existing_magento_id:
-            result = client.update_product(item_code, payload)
-        elif client.product_exists(item_code):
+        try:
+            existing_product = client.get_product(item_code)
+        except MagentoAPIError as e:
+            if e.status_code != 404:
+                raise
+            existing_product = None
+
+        if existing_product:
+            payload = _merge_preserving_magento_only_data(existing_product, payload)
             result = client.update_product(item_code, payload)
         else:
             result = client.create_product(payload)

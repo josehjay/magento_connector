@@ -480,6 +480,76 @@ class MagentoSettings(Document):
         return result
 
     @frappe.whitelist()
+    def get_attribute_map_overview(self):
+        """Return every ERPNext Item Attribute with its current Magento mapping state."""
+        from connector.sync.attribute_sync import get_attribute_map_overview
+
+        return get_attribute_map_overview()
+
+    @frappe.whitelist()
+    def get_magento_attributes_for_mapping(self):
+        """List existing Magento product attributes for the 'map to existing' dropdown."""
+        from connector.sync.attribute_sync import get_magento_attributes_for_mapping
+
+        return get_magento_attributes_for_mapping()
+
+    @frappe.whitelist()
+    def map_item_attribute_to_existing(self, item_attribute, magento_attribute_code):
+        """Map an ERPNext Item Attribute onto a Magento attribute that already exists."""
+        from connector.sync.attribute_sync import map_attribute_to_existing
+
+        result = map_attribute_to_existing(item_attribute, magento_attribute_code)
+        frappe.msgprint(
+            f"Mapped '{item_attribute}' to Magento attribute '{result.get('magento_attribute_code')}'. "
+            f"{len(result.get('added') or [])} new option(s) added, "
+            f"{result.get('skipped_existing', 0)} already present.",
+            indicator="green" if not result.get("failed") else "orange",
+        )
+        return result
+
+    @frappe.whitelist()
+    def create_item_attribute_in_magento(self, item_attribute):
+        """Create a brand-new Magento product attribute for this ERPNext Item Attribute."""
+        from connector.sync.attribute_sync import create_attribute_in_magento
+
+        result = create_attribute_in_magento(item_attribute)
+        frappe.msgprint(
+            result.get("message")
+            or f"Created Magento attribute '{result.get('magento_attribute_code')}'.",
+            indicator="green",
+        )
+        return result
+
+    @frappe.whitelist()
+    def sync_item_attribute_options_now(self, item_attribute):
+        """Manually push newly-added ERPNext values for one mapped attribute."""
+        from connector.sync.attribute_sync import sync_attribute_options_now
+
+        result = sync_attribute_options_now(item_attribute)
+        if result.get("skipped"):
+            frappe.msgprint(f"Nothing to sync ({result.get('reason')}).", indicator="orange")
+        else:
+            frappe.msgprint(
+                f"{len(result.get('added') or [])} new option(s) added, "
+                f"{result.get('skipped_existing', 0)} already present, "
+                f"{result.get('failed', 0)} failed.",
+                indicator="green" if not result.get("failed") else "orange",
+            )
+        return result
+
+    @frappe.whitelist()
+    def sync_all_attribute_options_now(self):
+        """Manually enqueue a catch-up options sync for every mapped attribute."""
+        frappe.enqueue(
+            "connector.tasks.sync_attribute_options",
+            queue="default",
+            timeout=600,
+            job_id="connector_manual_attribute_option_sync",
+            deduplicate=True,
+        )
+        frappe.msgprint("Attribute option sync has been queued.", indicator="blue")
+
+    @frappe.whitelist()
     def trigger_order_sync(self):
         """Manually enqueue an order sync."""
         frappe.enqueue(

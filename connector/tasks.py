@@ -110,6 +110,17 @@ def retry_failed_product_sync():
         frappe.log_error(frappe.get_traceback(), "Connector Scheduled: retry_failed_product_sync failed")
 
 
+def sync_attribute_options():
+    """Hourly: push newly-added values for already-mapped attributes (additive-only)."""
+    if not _is_magento_enabled():
+        return
+    try:
+        from connector.sync.attribute_sync import sync_all_mapped_attributes as _sync
+        _sync()
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Connector Scheduled: sync_attribute_options failed")
+
+
 def erpnext_product_sync():
     """Every 10 minutes: push stale/unsynced ERPNext items to remote ERPNext sites."""
     if not _is_erpnext_site_sync_enabled():

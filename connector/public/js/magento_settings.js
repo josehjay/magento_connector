@@ -463,6 +463,225 @@
         });
     }
 
+    // ── Attribute Mapping (ERPNext Item Attribute -> Magento attribute) ────
+
+    function escape_html(s) {
+        return frappe.utils.escape_html(s == null ? "" : String(s));
+    }
+
+    function render_attribute_rows(rows) {
+        if (!rows || !rows.length) {
+            return "<tr><td colspan='5' class='text-muted'>" + __("No Item Attributes found.") + "</td></tr>";
+        }
+        return rows.map(function (row) {
+            var status_class =
+                row.status === "Synced" ? "text-success"
+                    : row.status === "Failed" ? "text-danger"
+                        : row.status === "Mapped" ? "text-info"
+                            : "text-muted";
+            var magento_col = row.mapped
+                ? escape_html(row.magento_attribute_code) + (row.mapping_type ? " <span class='text-muted'>(" + escape_html(row.mapping_type) + ")</span>" : "")
+                : "<span class='text-muted'>" + __("— not mapped —") + "</span>";
+            var value_col = row.numeric_values ? __("numeric (no options)") : (row.value_count + " " + __("value(s)"));
+
+            var actions = "";
+            if (!row.mapped) {
+                actions =
+                    "<button type='button' class='btn btn-xs btn-default attr-map-existing' data-attr='" + escape_html(row.item_attribute) + "'>" +
+                    __("Map to Existing") + "</button> " +
+                    "<button type='button' class='btn btn-xs btn-primary attr-create-new' data-attr='" + escape_html(row.item_attribute) + "'>" +
+                    __("Create New") + "</button>";
+            } else {
+                actions =
+                    "<button type='button' class='btn btn-xs btn-default attr-sync-now' data-attr='" + escape_html(row.item_attribute) + "'>" +
+                    __("Sync Options Now") + "</button>";
+            }
+
+            var error_row = row.sync_error
+                ? "<div class='text-danger' style='font-size:11px'>" + escape_html(row.sync_error) + "</div>"
+                : "";
+
+            return (
+                "<tr>" +
+                "<td>" + escape_html(row.item_attribute) + "</td>" +
+                "<td>" + value_col + "</td>" +
+                "<td>" + magento_col + "</td>" +
+                "<td class='" + status_class + "'>" + escape_html(row.status) + error_row + "</td>" +
+                "<td>" + actions + "</td>" +
+                "</tr>"
+            );
+        }).join("");
+    }
+
+    function load_attribute_overview(frm, $wrapper) {
+        $wrapper.html("<p class='text-muted'>" + __("Loading…") + "</p>");
+        frappe.call({
+            doc: frm.doc,
+            method: "get_attribute_map_overview",
+            callback: function (r) {
+                var rows = r.message || [];
+                $wrapper.html(
+                    "<table class='table table-bordered' style='font-size:12px'>" +
+                    "<thead><tr>" +
+                    "<th>" + __("ERPNext Item Attribute") + "</th>" +
+                    "<th>" + __("Values") + "</th>" +
+                    "<th>" + __("Magento Attribute") + "</th>" +
+                    "<th>" + __("Status") + "</th>" +
+                    "<th>" + __("Actions") + "</th>" +
+                    "</tr></thead><tbody>" +
+                    render_attribute_rows(rows) +
+                    "</tbody></table>"
+                );
+            },
+        });
+    }
+
+    function prompt_map_to_existing(frm, item_attribute, on_done) {
+        frappe.call({
+            doc: frm.doc,
+            method: "get_magento_attributes_for_mapping",
+            freeze: true,
+            freeze_message: __("Loading Magento attributes…"),
+            callback: function (r) {
+                var res = r.message || {};
+                if (!res.ok || !res.items || !res.items.length) {
+                    frappe.msgprint({
+                        message: __("Could not load Magento attributes: {0}", [res.error || __("unknown error")]),
+                        indicator: "orange",
+                    });
+                    return;
+                }
+                var options = "\n" + res.items.map(function (a) {
+                    return a.attribute_code + "|" + a.attribute_code + " — " + (a.frontend_label || a.attribute_code);
+                }).join("\n");
+
+                var d = new frappe.ui.Dialog({
+                    title: __("Map {0} to an Existing Magento Attribute", [item_attribute]),
+                    fields: [
+                        {
+                            fieldtype: "Select",
+                            fieldname: "magento_attribute",
+                            label: __("Magento Attribute"),
+                            options: options,
+                            reqd: 1,
+                            description: __("Choose an attribute that already exists in Magento to avoid creating a duplicate."),
+                        },
+                    ],
+                    primary_action_label: __("Map"),
+                    primary_action: function (values) {
+                        var code = String(values.magento_attribute || "").split("|")[0];
+                        if (!code) return;
+                        d.hide();
+                        frappe.call({
+                            doc: frm.doc,
+                            method: "map_item_attribute_to_existing",
+                            args: { item_attribute: item_attribute, magento_attribute_code: code },
+                            freeze: true,
+                            freeze_message: __("Mapping attribute and syncing options…"),
+                            callback: function () {
+                                if (on_done) on_done();
+                            },
+                        });
+                    },
+                });
+                d.show();
+            },
+        });
+    }
+
+    function confirm_create_new(frm, item_attribute, on_done) {
+        frappe.confirm(
+            __(
+                "Create a new Magento attribute for '{0}'? This will POST a new EAV attribute " +
+                "(and its current values as options) to Magento. If an attribute with the same " +
+                "generated code already exists there, this will map to it instead of duplicating it.",
+                [item_attribute]
+            ),
+            function () {
+                frappe.call({
+                    doc: frm.doc,
+                    method: "create_item_attribute_in_magento",
+                    args: { item_attribute: item_attribute },
+                    freeze: true,
+                    freeze_message: __("Creating attribute in Magento…"),
+                    callback: function () {
+                        if (on_done) on_done();
+                    },
+                });
+            }
+        );
+    }
+
+    function sync_now(frm, item_attribute, on_done) {
+        frappe.call({
+            doc: frm.doc,
+            method: "sync_item_attribute_options_now",
+            args: { item_attribute: item_attribute },
+            freeze: true,
+            freeze_message: __("Syncing new options to Magento…"),
+            callback: function () {
+                if (on_done) on_done();
+            },
+        });
+    }
+
+    function open_attribute_mapping_dialog(frm) {
+        var info_html =
+            "<div style='font-size:12px;line-height:1.5;margin-bottom:8px'>" +
+            "<p><strong>" + __("How this works") + "</strong></p>" +
+            "<ul>" +
+            "<li>" + __("Unmapped attributes are never touched automatically — map or create them here deliberately.") + "</li>" +
+            "<li>" + __("\"Map to Existing\" links to a Magento attribute that already exists — nothing is created, avoiding duplicates.") + "</li>" +
+            "<li>" + __("\"Create New\" creates a brand-new Magento attribute (guarded against accidental duplicates by code).") + "</li>" +
+            "<li>" + __("Once mapped, new ERPNext values sync automatically (hourly) and via \"Sync Options Now\" — always additive, never deleting an existing option or attribute.") + "</li>" +
+            "</ul>" +
+            "</div>";
+
+        var d = new frappe.ui.Dialog({
+            title: __("Map / Create Magento Attributes"),
+            size: "extra-large",
+            fields: [
+                { fieldtype: "HTML", fieldname: "info", options: info_html },
+                { fieldtype: "HTML", fieldname: "attribute_table", options: "<p class='text-muted'>" + __("Loading…") + "</p>" },
+            ],
+            primary_action_label: __("Close"),
+            primary_action: function () { d.hide(); },
+        });
+
+        var $wrapper = d.fields_dict.attribute_table.$wrapper;
+
+        function refresh() {
+            load_attribute_overview(frm, $wrapper);
+        }
+
+        $wrapper.on("click", ".attr-map-existing", function () {
+            prompt_map_to_existing(frm, $(this).data("attr"), refresh);
+        });
+        $wrapper.on("click", ".attr-create-new", function () {
+            confirm_create_new(frm, $(this).data("attr"), refresh);
+        });
+        $wrapper.on("click", ".attr-sync-now", function () {
+            sync_now(frm, $(this).data("attr"), refresh);
+        });
+
+        d.show();
+        refresh();
+
+        var $footer = d.$wrapper.find(".modal-footer");
+        $('<button type="button" class="btn btn-default btn-sm">' + __("Refresh") + "</button>")
+            .prependTo($footer)
+            .on("click", refresh);
+        $('<button type="button" class="btn btn-default btn-sm">' + __("Sync All Mapped Now") + "</button>")
+            .insertBefore($footer.find(".btn-modal-primary"))
+            .on("click", function () {
+                frappe.call({
+                    doc: frm.doc,
+                    method: "sync_all_attribute_options_now",
+                    callback: refresh,
+                });
+            });
+    }
+
     // ── Main form handler ─────────────────────────────────────────────────
 
     frappe.ui.form.on("Magento Settings", {
@@ -557,6 +776,10 @@
                         });
                     },
                 });
+            }, __("Products"));
+
+            frm.add_custom_button(__("Map / Create Attributes"), function () {
+                open_attribute_mapping_dialog(frm);
             }, __("Products"));
 
             frm.add_custom_button(__("Sync Images Now"), function () {

@@ -1,0 +1,98 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "field:item_attribute",
+ "creation": "2024-01-01 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "item_attribute",
+  "magento_attribute_code",
+  "magento_attribute_id",
+  "frontend_label",
+  "column_break_1",
+  "mapping_type",
+  "status",
+  "last_synced_on",
+  "sync_error"
+ ],
+ "fields": [
+  {
+   "fieldname": "item_attribute",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "ERPNext Item Attribute",
+   "options": "Item Attribute",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "magento_attribute_code",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Magento Attribute Code",
+   "reqd": 1,
+   "description": "attribute_code of the Magento product attribute this maps to"
+  },
+  {
+   "fieldname": "magento_attribute_id",
+   "fieldtype": "Int",
+   "label": "Magento Attribute ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "frontend_label",
+   "fieldtype": "Data",
+   "label": "Magento Frontend Label",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "mapping_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Mapping Type",
+   "options": "Mapped to Existing\nCreated New",
+   "description": "Whether this attribute was mapped to one that already existed in Magento, or created new"
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Mapped\nSynced\nFailed",
+   "default": "Mapped"
+  },
+  {
+   "fieldname": "last_synced_on",
+   "fieldtype": "Datetime",
+   "label": "Last Synced On"
+  },
+  {
+   "fieldname": "sync_error",
+   "fieldtype": "Small Text",
+   "label": "Sync Error"
+  }
+ ],
+ "links": [],
+ "modified": "2024-01-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Connector",
+ "name": "Magento Attribute Mapping",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "role": "System Manager",
+   "write": 1,
+   "create": 1,
+   "delete": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 0
+}
