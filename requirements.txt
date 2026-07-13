@@ -1,6 +1,12 @@
-# Do NOT pin `gunicorn` or `pypika` here. Frappe pins these itself via a git
-# URL in its own pyproject.toml, and `uv` requires a single, consistent URL
-# per package across the whole resolution graph. Duplicating Frappe's pin here
-# goes stale every time Frappe bumps it, breaking `bench update` with
-# "conflicting URLs for package" errors. See scripts/check_frappe_pins.py.
+# `uv pip install --upgrade -e .` (what `bench get-app`/`bench update` runs)
+# requires that any git/URL-sourced package appearing only *transitively*
+# (frappe -> gunicorn / frappe -> pypika) also be declared directly here, or
+# resolution fails with "must be expressed as direct requirements". These two
+# lines MUST always be byte-for-byte identical to the pins in Frappe's own
+# pyproject.toml for the Frappe version this app targets — never hand-edit
+# them. Run `python scripts/check_frappe_pins.py --fix` (see that script and
+# the CI workflow) to keep them in sync automatically whenever Frappe bumps
+# either pin.
+gunicorn @ git+https://github.com/frappe/gunicorn@54b59ca884c79dcf04d4882658a32bbaf17e999f
+pypika @ git+https://github.com/frappe/pypika@2c50e6142b2d61d2d243e466fdd5dc03b3d918f2
 requests>=2.28.0

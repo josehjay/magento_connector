@@ -14,13 +14,18 @@ dynamic = ["version"]
 dependencies = [
     "frappe",
     "requests>=2.28.0",
+    # `uv pip install --upgrade -e .` (what `bench get-app`/`bench update` runs)
+    # requires that any git/URL-sourced package appearing only *transitively*
+    # (frappe -> gunicorn / frappe -> pypika) also be declared directly here,
+    # or resolution fails with "must be expressed as direct requirements".
+    # These two lines MUST always be byte-for-byte identical to the pins in
+    # Frappe's own pyproject.toml for the Frappe version this app targets —
+    # never hand-edit them. Run `python scripts/check_frappe_pins.py --fix`
+    # (see that script + the CI workflow) to keep them in sync automatically
+    # whenever Frappe bumps either pin.
+    "gunicorn @ git+https://github.com/frappe/gunicorn@54b59ca884c79dcf04d4882658a32bbaf17e999f",
+    "pypika @ git+https://github.com/frappe/pypika@2c50e6142b2d61d2d243e466fdd5dc03b3d918f2",
 ]
-# NOTE: Do not re-add pinned git dependencies for packages Frappe already pins
-# itself (e.g. gunicorn, pypika). Frappe's own pyproject.toml is the single
-# source of truth for those pins; duplicating them here goes stale every time
-# Frappe bumps its pin and breaks `uv` resolution with "conflicting URLs for
-# package" errors. See scripts/check_frappe_pins.py and the CI workflow that
-# guards against this regressing.
 
 [project.urls]
 Homepage = "https://github.com/yourorg/connector"

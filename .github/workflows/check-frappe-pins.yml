@@ -21,20 +21,52 @@ on:
       frappe_ref:
         description: "Frappe git ref to compare against"
         required: false
-        default: "develop"
+        default: "version-16"
+
+env:
+  DEFAULT_FRAPPE_REF: "version-16"
 
 jobs:
   check-pins:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        frappe-ref: ["develop", "version-16"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Check pins against Frappe (${{ matrix.frappe-ref }})
+      - name: Check pins against Frappe (${{ github.event.inputs.frappe_ref || env.DEFAULT_FRAPPE_REF }})
         run: |
           python scripts/check_frappe_pins.py \
-            --frappe-ref "${{ github.event.inputs.frappe_ref || matrix.frappe-ref }}"
+            --frappe-ref "${{ github.event.inputs.frappe_ref || env.DEFAULT_FRAPPE_REF }}"
+
+  auto-fix-pr:
+    # Only runs on the schedule/manual trigger, never on push/PR, so it can't
+    # interfere with an in-flight PR. Opens (or updates) a PR with the
+    # corrected pins whenever Frappe has drifted, so a human just needs to
+    # review and merge instead of debugging a `bench update` failure.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Sync pins to Frappe (${{ github.event.inputs.frappe_ref || env.DEFAULT_FRAPPE_REF }})
+        run: |
+          python scripts/check_frappe_pins.py \
+            --frappe-ref "${{ github.event.inputs.frappe_ref || env.DEFAULT_FRAPPE_REF }}" \
+            --fix
+      - name: Open PR with any pin fixes
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore: sync Frappe gunicorn/pypika pins"
+          title: "chore: sync Frappe gunicorn/pypika pins"
+          body: |
+            Frappe bumped a git-URL pin (`gunicorn` and/or `pypika`). This PR
+            was generated automatically by `scripts/check_frappe_pins.py --fix`
+            to keep this app installable via `bench get-app` / `bench update`.
+          branch: chore/sync-frappe-pins
+          delete-branch: true
