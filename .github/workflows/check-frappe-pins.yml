@@ -1,0 +1,40 @@
+name: Check Frappe dependency pins
+
+on:
+  push:
+    paths:
+      - "pyproject.toml"
+      - "requirements.txt"
+      - "scripts/check_frappe_pins.py"
+      - ".github/workflows/check-frappe-pins.yml"
+  pull_request:
+    paths:
+      - "pyproject.toml"
+      - "requirements.txt"
+      - "scripts/check_frappe_pins.py"
+  schedule:
+    # Weekly, so drift is caught even if this app's files never change but
+    # Frappe bumps its own gunicorn/pypika pin in the meantime.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      frappe_ref:
+        description: "Frappe git ref to compare against"
+        required: false
+        default: "develop"
+
+jobs:
+  check-pins:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        frappe-ref: ["develop", "version-16"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check pins against Frappe (${{ matrix.frappe-ref }})
+        run: |
+          python scripts/check_frappe_pins.py \
+            --frappe-ref "${{ github.event.inputs.frappe_ref || matrix.frappe-ref }}"
