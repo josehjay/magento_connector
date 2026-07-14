@@ -32,12 +32,32 @@ def _is_job_running(job_id):
 
 
 def sync_inventory():
-    """Every 15 minutes: push stock quantities to Magento."""
+    """
+    Every 15 minutes: push stock quantities to Magento.
+
+    Runs in its own background job with a generous explicit timeout instead
+    of executing inline in the scheduler tick. Without this, the job inherits
+    the scheduler's short default timeout (~300s) — easily exceeded once you
+    have more than a couple dozen SKUs, even with per-item error isolation,
+    since a single slow Magento response can eat most of that budget alone.
+    """
     if not _is_magento_enabled():
         return
+
+    job_id = "connector_inventory_sync"
+    if _is_job_running(job_id):
+        frappe.logger("connector").info("sync_inventory: inventory sync job already running; skipping.")
+        return
+
     try:
-        from connector.sync.inventory_sync import sync_inventory as _sync
-        _sync()
+        frappe.enqueue(
+            "connector.sync.inventory_sync.sync_inventory",
+            queue="long",
+            timeout=1800,
+            job_id=job_id,
+            deduplicate=True,
+        )
+        frappe.logger("connector").info("sync_inventory: enqueued inventory sync job.")
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Connector Scheduled: sync_inventory failed")
 

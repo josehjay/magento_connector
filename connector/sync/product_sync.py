@@ -3,8 +3,13 @@ Product Sync: ERPNext Item → Magento Product
 
 Triggered by:
   - Item.after_insert / Item.on_update  (real-time, deduplicated by job_name)
-  - tasks.full_product_sync()           (hourly catch-up, scheduled)
+  - tasks.full_product_sync()           (daily catch-up, scheduled; also "Sync All Products Now")
   - tasks.retry_failed_product_sync()   (every 30 min, retries failed items with backoff)
+
+full_product_sync() only pushes items that aren't already "Synced" in the
+Magento Product Map (never synced, "Pending", "Failed"-and-not-exhausted, or
+"Synced" but edited in ERPNext since) — it complements Rebuild Product Maps
+rather than re-pushing everything that tool already restored.
 
 Retry strategy (exponential backoff):
   retry_count 1 → wait  5 min before retry
@@ -14,6 +19,8 @@ Retry strategy (exponential backoff):
   retry_count 5+ → wait 60 min (capped)
   retry_count > MAX_RETRIES → item is skipped until manually triggered or item is re-saved
 """
+
+import time
 
 import frappe
 from connector.api.magento_client import MagentoClient, MagentoAPIError
@@ -696,14 +703,33 @@ def _handle_push_failure(item_code, exc, payload=None):
 # Batch processor (called by both full_product_sync and retry_failed_product_sync)
 # ---------------------------------------------------------------------------
 
-def _run_batch_product_sync(item_codes):
+def _run_batch_product_sync(item_codes, time_budget_seconds=None):
     """
     Process a list of item_codes sequentially within a single background job.
-    Each item failure is isolated — one bad item cannot stop the rest.
+    Each item's failure is isolated — one bad item cannot stop the rest.
+
+    If `time_budget_seconds` is given, a deadline is computed from `time.monotonic()`
+    at the START of this call (in whichever worker process actually runs the
+    job — never computed by the enqueuing process, since `time.monotonic()`
+    is only guaranteed comparable within one machine/clock domain). Once that
+    budget is used up, processing stops immediately and the untouched
+    remainder is left for the caller to re-query and hand to the next chunk —
+    this is what keeps a run of slow/hanging Magento responses from ever
+    risking the job's hard RQ timeout (which would otherwise silently kill
+    the whole batch mid-item instead of cleanly continuing on the next run).
     """
     logger = frappe.logger("connector")
+    deadline = time.monotonic() + time_budget_seconds if time_budget_seconds else None
     success = failed = 0
+    attempted = 0
     for item_code in item_codes:
+        if deadline is not None and time.monotonic() > deadline:
+            logger.info(
+                f"_run_batch_product_sync: soft deadline reached after {attempted} item(s); "
+                f"{len(item_codes) - attempted} item(s) deferred to the next chunk."
+            )
+            break
+        attempted += 1
         try:
             push_item_to_magento(item_code)
             success += 1
@@ -713,7 +739,10 @@ def _run_batch_product_sync(item_codes):
                 f"Batch sync failed for {item_code}: {e}",
                 "Connector Product Sync Batch",
             )
-    logger.info(f"_run_batch_product_sync: {success} ok, {failed} failed out of {len(item_codes)}")
+    logger.info(
+        f"_run_batch_product_sync: {success} ok, {failed} failed out of {attempted} attempted "
+        f"({len(item_codes)} in batch)."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -723,14 +752,37 @@ def _run_batch_product_sync(item_codes):
 # Single job name so only one full-sync chunk runs at a time.
 FULL_SYNC_JOB_NAME = "magento_full_product_sync"
 # Items per chunk; each chunk runs in one job and stays within timeout.
-FULL_SYNC_CHUNK_SIZE = 100
-# Timeout per chunk (seconds); ~FULL_SYNC_CHUNK_SIZE * 15s per item.
+FULL_SYNC_CHUNK_SIZE = 50
+# Hard timeout per chunk job (seconds).
 FULL_SYNC_CHUNK_TIMEOUT = 1800
+# Stop taking new items this many seconds before the hard timeout, so a run of
+# slow items causes an early, clean handoff to the next chunk instead of a
+# mid-item kill by RQ's job timeout.
+FULL_SYNC_SOFT_DEADLINE_MARGIN = 300
+# Failed items with more consecutive failures than this are left to the
+# dedicated retry_failed_product_sync() backoff schedule instead of being
+# retried on every full-sync run.
+FULL_SYNC_MAX_RETRIES = MAX_RETRIES
 
 
-def _get_stale_item_codes_to_sync():
+def _get_items_needing_full_sync():
     """
-    Return sorted list of item codes that are stale or never synced (templates first).
+    Return sorted list of item codes that still need a bulk push, restricted
+    to the Item Groups configured in "Item Groups to Sync" (Magento Settings).
+
+    An item needs syncing if:
+      - it has no Magento Product Map row yet (never synced), or
+      - its map status is "Pending" (checked — not found in Magento), or
+      - its map status is "Failed" and it hasn't exhausted retries yet
+        (next attempt: if it now succeeds, its status becomes "Synced" and
+        it's skipped on subsequent runs), or
+      - its map status is "Synced" but the item was edited in ERPNext since
+        the last successful sync (keeps ERPNext as the source of truth).
+
+    Items already "Synced" with no changes since — whether that map entry
+    came from a real push or from "Rebuild Product Maps" — are skipped, so
+    this tool complements the rebuild tool instead of re-pushing everything
+    it just restored.
     """
     filters = {"sync_to_magento": 1}
     allowed_groups = _get_allowed_item_groups()
@@ -742,13 +794,41 @@ def _get_stale_item_codes_to_sync():
         filters=filters,
         fields=["item_code", "modified", "magento_last_synced_on", "has_variants", "variant_of"],
     )
+    if not items:
+        return []
 
-    to_sync = [
-        item["item_code"]
-        for item in items
-        if not item.get("magento_last_synced_on")
-        or (item.get("modified") and item["magento_last_synced_on"] < item["modified"])
-    ]
+    item_codes = [item["item_code"] for item in items]
+    map_rows = {
+        row["item_code"]: row
+        for row in frappe.get_all(
+            "Magento Product Map",
+            filters={"item_code": ["in", item_codes]},
+            fields=["item_code", "sync_status", "retry_count"],
+        )
+    }
+
+    to_sync = []
+    for item in items:
+        item_code = item["item_code"]
+        map_row = map_rows.get(item_code)
+        status = (map_row or {}).get("sync_status")
+
+        if status == "Failed":
+            if (map_row.get("retry_count") or 0) > FULL_SYNC_MAX_RETRIES:
+                continue  # exhausted — left to a manual retry or item re-save
+            to_sync.append(item_code)
+            continue
+
+        if status != "Synced":
+            # No map row yet, or "Pending" (checked, not found in Magento).
+            to_sync.append(item_code)
+            continue
+
+        # Already Synced — only re-push if ERPNext data changed since then.
+        if not item.get("magento_last_synced_on") or (
+            item.get("modified") and item["magento_last_synced_on"] < item["modified"]
+        ):
+            to_sync.append(item_code)
 
     by_code = {item["item_code"]: item for item in items}
     to_sync.sort(key=lambda c: (0 if (by_code.get(c) or {}).get("has_variants") else 1, c))
@@ -757,30 +837,39 @@ def _get_stale_item_codes_to_sync():
 
 def run_full_product_sync_chunk():
     """
-    Process one chunk of stale items, then enqueue the next chunk if more remain.
-    Re-queries stale list each run so progress is persisted. Only one job with
-    FULL_SYNC_JOB_NAME runs at a time.
+    Process one chunk of items needing sync, then enqueue the next chunk if
+    more remain. Re-queries the "needs sync" list before AND after processing
+    so progress is always persisted — this naturally accounts for items that
+    succeeded (now "Synced", excluded next time), items that failed (retried
+    next chunk, up to FULL_SYNC_MAX_RETRIES), and items deferred by the soft
+    deadline (still pending, retried next chunk).
+
+    Only one job with FULL_SYNC_JOB_NAME runs at a time. An unexpected error
+    in this chunk is logged but never stops the remaining backlog — the next
+    chunk is still enqueued.
     """
     if not _is_sync_enabled():
         return
 
-    to_sync = _get_stale_item_codes_to_sync()
+    to_sync = _get_items_needing_full_sync()
     if not to_sync:
-        frappe.logger("connector").info("run_full_product_sync_chunk: no stale items.")
+        frappe.logger("connector").info("run_full_product_sync_chunk: nothing needs syncing.")
         return
 
     chunk = to_sync[:FULL_SYNC_CHUNK_SIZE]
-    remaining = len(to_sync) - len(chunk)
+    time_budget = FULL_SYNC_CHUNK_TIMEOUT - FULL_SYNC_SOFT_DEADLINE_MARGIN
 
     frappe.logger("connector").info(
-        f"run_full_product_sync_chunk: processing {len(chunk)} items ({remaining} remaining)."
+        f"run_full_product_sync_chunk: processing up to {len(chunk)} item(s) "
+        f"({len(to_sync) - len(chunk)} more queued after this chunk)."
     )
     try:
-        _run_batch_product_sync(chunk)
-    except Exception as e:
-        frappe.log_error(str(e), "Connector Full Product Sync Chunk")
-        raise
+        _run_batch_product_sync(chunk, time_budget_seconds=time_budget)
+    except Exception:
+        # Never let one bad chunk silently stop the rest of the backlog.
+        frappe.log_error(frappe.get_traceback(), "Connector Full Product Sync Chunk")
 
+    remaining = len(_get_items_needing_full_sync())
     if remaining > 0:
         frappe.enqueue(
             "connector.sync.product_sync.run_full_product_sync_chunk",
@@ -791,22 +880,24 @@ def run_full_product_sync_chunk():
             enqueue_after_commit=True,
         )
         frappe.logger("connector").info(
-            f"run_full_product_sync_chunk: enqueued next chunk ({remaining} items left)."
+            f"run_full_product_sync_chunk: enqueued next chunk ({remaining} item(s) left)."
         )
+    else:
+        frappe.logger("connector").info("run_full_product_sync_chunk: full sync complete.")
 
 
 def full_product_sync():
     """
     Enqueue one chunk job to start the full sync. That job processes a fixed number
-    of items, then enqueues the next chunk if more stale items remain. At most one
+    of items, then enqueues the next chunk if more items remain. At most one
     chunk job runs at a time; avoids timeout on 10k+ items.
     """
     if not _is_sync_enabled():
         return
 
-    to_sync = _get_stale_item_codes_to_sync()
+    to_sync = _get_items_needing_full_sync()
     if not to_sync:
-        frappe.logger("connector").info("full_product_sync: nothing stale to sync.")
+        frappe.logger("connector").info("full_product_sync: nothing needs syncing.")
         return
 
     frappe.enqueue(
@@ -818,7 +909,7 @@ def full_product_sync():
         enqueue_after_commit=True,
     )
     frappe.logger("connector").info(
-        f"full_product_sync: enqueued 1 chunk job ({len(to_sync)} stale items total)."
+        f"full_product_sync: enqueued 1 chunk job ({len(to_sync)} item(s) total need syncing)."
     )
 
 
@@ -865,21 +956,28 @@ def retry_failed_product_sync():
     if not due:
         return
 
-    # Only retry items that still want to be synced
-    valid = set(
-        frappe.get_all(
-            "Item",
-            filters={"item_code": ["in", due], "sync_to_magento": 1},
-            pluck="item_code",
-        )
-    )
+    # Only retry items that still want to be synced and are still within an
+    # allowed Item Group — a group removed from "Item Groups to Sync" after
+    # an item failed should stop being retried, not loop forever.
+    valid_filters = {"item_code": ["in", due], "sync_to_magento": 1}
+    allowed_groups = _get_allowed_item_groups()
+    if allowed_groups:
+        valid_filters["item_group"] = ["in", list(allowed_groups)]
+    valid = set(frappe.get_all("Item", filters=valid_filters, pluck="item_code"))
     due = [c for c in due if c in valid]
 
     if not due:
         return
 
+    # Cap the batch so a large backlog of failed items can't overload the
+    # system in one job — remaining items are simply picked up on the next
+    # 30-minute run (they're still "Failed" until retried successfully).
+    due = due[:BATCH_SIZE]
+
     # Run retries in a single long-queue job so the scheduler task returns within
-    # its 300s limit; the actual work uses BATCH_JOB_TIMEOUT (e.g. 900s).
+    # its 300s limit; the actual work uses BATCH_JOB_TIMEOUT (e.g. 900s). A soft
+    # deadline (margin below the hard timeout) keeps a run of slow/hanging
+    # Magento responses from risking a mid-item kill of the whole batch.
     frappe.enqueue(
         "connector.sync.product_sync._run_batch_product_sync",
         queue="long",
@@ -888,9 +986,10 @@ def retry_failed_product_sync():
         deduplicate=True,
         enqueue_after_commit=True,
         item_codes=due,
+        time_budget_seconds=BATCH_JOB_TIMEOUT - 120,
     )
     frappe.logger("connector").info(
-        f"retry_failed_product_sync: enqueued {len(due)} failed items for retry."
+        f"retry_failed_product_sync: enqueued {len(due)} failed item(s) for retry."
     )
 
 

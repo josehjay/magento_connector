@@ -235,5 +235,194 @@ class TestProductSync(unittest.TestCase):
         mock_frappe.db.commit.assert_called_once()
 
 
+class TestGetItemsNeedingFullSync(unittest.TestCase):
+    """
+    _get_items_needing_full_sync must skip items already "Synced" and
+    unchanged (whether that came from a real push or Rebuild Product Maps),
+    retry "Failed" items under the retry cap, and respect the "Item Groups
+    to Sync" filter.
+    """
+
+    @staticmethod
+    def _wire_get_all(mock_frappe, items, map_rows):
+        def side_effect(doctype, **kwargs):
+            if doctype == "Item":
+                return items
+            if doctype == "Magento Product Map":
+                return map_rows
+            return []
+        mock_frappe.get_all.side_effect = side_effect
+
+    @patch("connector.sync.product_sync.frappe")
+    def test_skips_synced_unchanged_item(self, mock_frappe):
+        mock_frappe.get_single.return_value = MagicMock(magento_item_groups=[])
+        items = [{
+            "item_code": "A", "modified": "2026-01-01 00:00:00",
+            "magento_last_synced_on": "2026-01-02 00:00:00",
+            "has_variants": 0, "variant_of": None,
+        }]
+        map_rows = [{"item_code": "A", "sync_status": "Synced", "retry_count": 0}]
+        self._wire_get_all(mock_frappe, items, map_rows)
+
+        from connector.sync.product_sync import _get_items_needing_full_sync
+        self.assertEqual(_get_items_needing_full_sync(), [])
+
+    @patch("connector.sync.product_sync.frappe")
+    def test_includes_synced_item_edited_since_last_sync(self, mock_frappe):
+        mock_frappe.get_single.return_value = MagicMock(magento_item_groups=[])
+        items = [{
+            "item_code": "A", "modified": "2026-01-03 00:00:00",
+            "magento_last_synced_on": "2026-01-02 00:00:00",
+            "has_variants": 0, "variant_of": None,
+        }]
+        map_rows = [{"item_code": "A", "sync_status": "Synced", "retry_count": 0}]
+        self._wire_get_all(mock_frappe, items, map_rows)
+
+        from connector.sync.product_sync import _get_items_needing_full_sync
+        self.assertEqual(_get_items_needing_full_sync(), ["A"])
+
+    @patch("connector.sync.product_sync.frappe")
+    def test_includes_never_synced_item(self, mock_frappe):
+        mock_frappe.get_single.return_value = MagicMock(magento_item_groups=[])
+        items = [{
+            "item_code": "A", "modified": "2026-01-01 00:00:00",
+            "magento_last_synced_on": None,
+            "has_variants": 0, "variant_of": None,
+        }]
+        self._wire_get_all(mock_frappe, items, [])  # no map row at all
+
+        from connector.sync.product_sync import _get_items_needing_full_sync
+        self.assertEqual(_get_items_needing_full_sync(), ["A"])
+
+    @patch("connector.sync.product_sync.frappe")
+    def test_includes_pending_item(self, mock_frappe):
+        mock_frappe.get_single.return_value = MagicMock(magento_item_groups=[])
+        items = [{
+            "item_code": "A", "modified": "2026-01-01 00:00:00",
+            "magento_last_synced_on": None,
+            "has_variants": 0, "variant_of": None,
+        }]
+        map_rows = [{"item_code": "A", "sync_status": "Pending", "retry_count": 0}]
+        self._wire_get_all(mock_frappe, items, map_rows)
+
+        from connector.sync.product_sync import _get_items_needing_full_sync
+        self.assertEqual(_get_items_needing_full_sync(), ["A"])
+
+    @patch("connector.sync.product_sync.frappe")
+    def test_retries_failed_item_under_the_retry_cap(self, mock_frappe):
+        mock_frappe.get_single.return_value = MagicMock(magento_item_groups=[])
+        items = [{
+            "item_code": "A", "modified": "2026-01-01 00:00:00",
+            "magento_last_synced_on": None,
+            "has_variants": 0, "variant_of": None,
+        }]
+        map_rows = [{"item_code": "A", "sync_status": "Failed", "retry_count": 3}]
+        self._wire_get_all(mock_frappe, items, map_rows)
+
+        from connector.sync.product_sync import _get_items_needing_full_sync
+        self.assertEqual(_get_items_needing_full_sync(), ["A"])
+
+    @patch("connector.sync.product_sync.frappe")
+    def test_skips_failed_item_that_exhausted_retries(self, mock_frappe):
+        mock_frappe.get_single.return_value = MagicMock(magento_item_groups=[])
+        items = [{
+            "item_code": "A", "modified": "2026-01-01 00:00:00",
+            "magento_last_synced_on": None,
+            "has_variants": 0, "variant_of": None,
+        }]
+        map_rows = [{"item_code": "A", "sync_status": "Failed", "retry_count": 999}]
+        self._wire_get_all(mock_frappe, items, map_rows)
+
+        from connector.sync.product_sync import _get_items_needing_full_sync
+        self.assertEqual(_get_items_needing_full_sync(), [])
+
+    @patch("connector.sync.product_sync.frappe")
+    def test_respects_item_groups_to_sync_filter(self, mock_frappe):
+        mock_frappe.get_single.return_value = MagicMock(
+            magento_item_groups=[MagicMock(item_group="Books")]
+        )
+        captured_filters = {}
+
+        def side_effect(doctype, **kwargs):
+            if doctype == "Item":
+                captured_filters.update(kwargs.get("filters") or {})
+            return []
+        mock_frappe.get_all.side_effect = side_effect
+
+        from connector.sync.product_sync import _get_items_needing_full_sync
+        _get_items_needing_full_sync()
+
+        self.assertEqual(captured_filters.get("item_group"), ["in", ["Books"]])
+
+
+class TestRunBatchProductSyncSoftDeadline(unittest.TestCase):
+    """
+    A soft time budget must stop the batch early instead of ever risking a
+    hard job-timeout kill mid-item — untouched items are simply left for the
+    caller to retry on the next chunk.
+    """
+
+    @patch("connector.sync.product_sync.push_item_to_magento")
+    @patch("connector.sync.product_sync.time")
+    @patch("connector.sync.product_sync.frappe")
+    def test_stops_once_time_budget_is_exhausted(self, mock_frappe, mock_time, mock_push):
+        # monotonic() is called once up front to compute the deadline (t=0,
+        # budget=10 -> deadline=10), then once per item before it starts:
+        # item A at t=1 (within budget, proceeds), item B at t=20 (budget
+        # already exceeded, loop stops before pushing B or C).
+        mock_time.monotonic.side_effect = [0, 1, 20]
+
+        from connector.sync.product_sync import _run_batch_product_sync
+        _run_batch_product_sync(["A", "B", "C"], time_budget_seconds=10)
+
+        mock_push.assert_called_once_with("A")
+
+    @patch("connector.sync.product_sync.push_item_to_magento")
+    @patch("connector.sync.product_sync.frappe")
+    def test_processes_all_items_when_no_budget_given(self, mock_frappe, mock_push):
+        from connector.sync.product_sync import _run_batch_product_sync
+        _run_batch_product_sync(["A", "B", "C"])
+
+        self.assertEqual(mock_push.call_count, 3)
+
+    @patch("connector.sync.product_sync.push_item_to_magento")
+    @patch("connector.sync.product_sync.frappe")
+    def test_one_item_failure_does_not_stop_the_rest(self, mock_frappe, mock_push):
+        mock_push.side_effect = [None, Exception("boom"), None]
+
+        from connector.sync.product_sync import _run_batch_product_sync
+        _run_batch_product_sync(["A", "B", "C"])
+
+        self.assertEqual(mock_push.call_count, 3)
+
+
+class TestRetryFailedProductSyncItemGroupFilter(unittest.TestCase):
+    """retry_failed_product_sync must stop retrying items whose Item Group is
+    no longer in "Item Groups to Sync"."""
+
+    @patch("connector.sync.product_sync.frappe")
+    def test_respects_item_groups_to_sync_filter(self, mock_frappe):
+        mock_frappe.get_single.return_value = MagicMock(
+            magento_item_groups=[MagicMock(item_group="Books")]
+        )
+
+        captured_item_filters = {}
+
+        def side_effect(doctype, **kwargs):
+            if doctype == "Magento Product Map":
+                return [{"item_code": "A", "retry_count": 1, "last_failed_at": None}]
+            if doctype == "Item":
+                captured_item_filters.update(kwargs.get("filters") or {})
+                return []  # "A" is not in an allowed group -> filtered out
+            return []
+        mock_frappe.get_all.side_effect = side_effect
+
+        from connector.sync.product_sync import retry_failed_product_sync
+        retry_failed_product_sync()
+
+        self.assertEqual(captured_item_filters.get("item_group"), ["in", ["Books"]])
+        mock_frappe.enqueue.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

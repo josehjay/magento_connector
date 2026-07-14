@@ -139,8 +139,17 @@ class MagentoClient:
     # ------------------------------------------------------------------
 
     def _request(self, method, endpoint, data=None, params=None, timeout=None):
-        """Execute an HTTP request with retry on rate-limit (429) and timeouts."""
-        req_timeout = timeout or (10, 120)  # (connect_timeout, read_timeout)
+        """
+        Execute an HTTP request with retry on rate-limit (429) and timeouts.
+
+        Default (connect, read) timeout is kept short (10s / 45s) so a single
+        slow/hanging Magento response can never eat up the caller's whole job
+        budget — with MAX_RETRIES=3 the worst case for one call is well under
+        three minutes, instead of the ~6+ minutes a 120s read timeout allowed.
+        Callers doing something legitimately slower (e.g. bulk order pulls)
+        pass their own `timeout=` override.
+        """
+        req_timeout = timeout or (10, 45)  # (connect_timeout, read_timeout)
         last_error = None
 
         for api_base in self.api_bases:
