@@ -31,23 +31,80 @@ Each integration module can be independently enabled or disabled from **Connecto
 
 ---
 
-## Installation
+## Installation / update
 
-### 1. Get the app
+### 1. Get the app (first-time)
+
 ```bash
+cd /path/to/frappe-bench
+
 # From a local path:
-bench get-app connector /path/to/connector
+bench get-app connector /path/to/magento_connector
 
 # Or from git (once published):
 bench get-app connector https://github.com/yourorg/connector
 ```
 
-### 2. Install on your site
+### 2. Install on your site (first-time)
+
 ```bash
-bench install-app connector
-bench migrate
+bench --site <your-site> install-app connector
+bench --site <your-site> migrate
+bench --site <your-site> clear-cache
 bench restart
 ```
+
+### Update only this app (already installed)
+
+`bench update` refreshes **all** apps. To update **only** `connector`:
+
+```bash
+cd /path/to/frappe-bench
+
+# 1) Pull latest code for this app only
+cd apps/connector
+git pull
+cd ../..
+
+# 2) Reinstall Python package for this app (picks up new modules)
+bench setup requirements --app connector
+# or: ./env/bin/pip install -e apps/connector --quiet
+
+# 3) Run patches / schema for this site
+bench --site <your-site> migrate
+
+# 4) Clear cache and reload processes
+bench --site <your-site> clear-cache
+bench restart
+```
+
+If the bench uses a specific branch:
+
+```bash
+cd apps/connector
+git fetch origin
+git checkout <branch>
+git pull origin <branch>
+cd ../..
+```
+
+Notes:
+
+- `migrate` alone does **not** download new commits — you must `git pull` inside `apps/connector` first.
+- Skip `bench setup requirements` if you only changed Python inside the app and did not change dependencies.
+- Hard-refresh the browser (Ctrl+Shift+R) after updates if desk pages look stale.
+
+### Automatic versioning
+
+Every `git push` / remote sync bumps the patch version (`connector/__init__.py` and `setup.py`) and commits `chore: bump version to X.Y.Z`.
+
+After cloning, enable the git hook once:
+
+```bash
+python scripts/install_git_hooks.py
+```
+
+Skip a bump when needed: `SKIP_VERSION_BUMP=1 git push`.
 
 ### 3. Magento side setup (one-time, only if using Magento integration)
 1. In Magento Admin → **System → Extensions → Integrations**

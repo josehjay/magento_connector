@@ -1,0 +1,72 @@
+#!/bin/sh
+# Auto-bump app version before every push to a remote.
+# If HEAD is already a version-bump commit, the push proceeds normally.
+# Otherwise this creates the bump commit, re-pushes, and aborts the original
+# push so the remote never receives a tip without the new version.
+
+set -e
+
+if [ "${SKIP_VERSION_BUMP}" = "1" ] || [ "${CUSTOM_VERSION_BUMPED}" = "1" ]; then
+	exit 0
+fi
+
+remote="$1"
+if [ -z "$remote" ]; then
+	exit 0
+fi
+
+# Only act when at least one non-delete ref is being pushed.
+has_push=0
+while read -r local_ref local_sha remote_ref remote_sha
+do
+	if [ -n "$local_sha" ] && [ "$local_sha" != "0000000000000000000000000000000000000000" ]; then
+		has_push=1
+		break
+	fi
+done
+
+if [ "$has_push" -ne 1 ]; then
+	exit 0
+fi
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT" || exit 0
+
+tip_msg="$(git log -1 --pretty=%s 2>/dev/null || true)"
+case "$tip_msg" in
+	"chore: bump version to "*)
+		exit 0
+		;;
+esac
+
+if command -v python >/dev/null 2>&1; then
+	PY=python
+elif command -v python3 >/dev/null 2>&1; then
+	PY=python3
+else
+	echo "pre-push: python not found; skipping automatic version bump" >&2
+	exit 0
+fi
+
+"$PY" "$ROOT/scripts/auto_version_on_push.py" >&2
+
+tip_msg="$(git log -1 --pretty=%s 2>/dev/null || true)"
+case "$tip_msg" in
+	"chore: bump version to "*)
+		;;
+	*)
+		# No bump commit was created (noop / in-progress git state).
+		exit 0
+		;;
+esac
+
+branch="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
+if [ -z "$branch" ]; then
+	echo "pre-push: detached HEAD after version bump; push manually" >&2
+	exit 1
+fi
+
+echo "pre-push: re-pushing $branch to $remote with version bump..." >&2
+CUSTOM_VERSION_BUMPED=1 git push "$remote" "refs/heads/$branch"
+# Abort the original push (it would target the pre-bump SHA).
+exit 1
