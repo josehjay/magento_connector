@@ -101,10 +101,12 @@ scheduler_events = {
             "connector.tasks.full_product_sync",
             "connector.tasks.sync_attribute_options",
         ],
-        # Image URL sync + Magento Product Map Pending/Failed batch every 30 min
+        # Image URL sync + Magento Product Map Pending/Failed batch +
+        # remove Magento products for Items disabled in ERPNext
         "*/30 * * * *": [
             "connector.tasks.sync_images",
             "connector.tasks.retry_failed_product_sync",
+            "connector.tasks.cleanup_disabled_products",
         ],
     }
 }

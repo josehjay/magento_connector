@@ -14,11 +14,20 @@ MOCK_ITEM = {
     "description": "A test product description",
     "is_sales_item": 1,
     "sync_to_magento": 1,
+    "disabled": 0,
     "weight_per_unit": 1.5,
     "magento_product_id": None,
     "magento_last_synced_on": None,
     "magento_sync_error": "",
 }
+
+
+def _mock_item(**overrides):
+    """Item MagicMock with .get() returning real field values (not nested mocks)."""
+    data = {**MOCK_ITEM, **overrides}
+    item = MagicMock(**data)
+    item.get.side_effect = lambda key, *a, **k: data.get(key)
+    return item
 
 
 class TestProductSync(unittest.TestCase):
@@ -28,8 +37,10 @@ class TestProductSync(unittest.TestCase):
     @patch("connector.sync.product_sync.upsert_map")
     @patch("connector.sync.product_sync.create_log")
     @patch("connector.sync.product_sync._get_item_price")
+    @patch("connector.sync.product_sync._pull_magento_data_for_item")
     def test_push_new_item_creates_product(
         self,
+        mock_pull,
         mock_price,
         mock_log,
         mock_upsert,
@@ -38,12 +49,13 @@ class TestProductSync(unittest.TestCase):
     ):
         """push_item_to_magento should call create_product when Magento has no such SKU (404)."""
         mock_frappe.db.get_single_value.return_value = True
-        mock_frappe.get_doc.return_value = MagicMock(**MOCK_ITEM)
+        mock_frappe.get_doc.return_value = _mock_item()
         mock_frappe.get_single.return_value = MagicMock(
             price_list="Standard Selling",
             magento_item_groups=[],
         )
         mock_price.return_value = 99.99
+        mock_pull.return_value = {}
 
         mock_client = MagicMock()
         mock_client.get_product.side_effect = MagentoAPIError("not found", status_code=404)
@@ -55,15 +67,24 @@ class TestProductSync(unittest.TestCase):
 
         mock_client.create_product.assert_called_once()
         mock_client.update_product.assert_not_called()
-        mock_upsert.assert_called_once_with("TEST-SKU-001", 101, "TEST-SKU-001", "Synced")
+        mock_upsert.assert_called_once_with(
+            "TEST-SKU-001",
+            101,
+            "TEST-SKU-001",
+            status="Synced",
+            retry_count=0,
+            last_failed_at=None,
+        )
 
     @patch("connector.sync.product_sync.frappe")
     @patch("connector.sync.product_sync.MagentoClient")
     @patch("connector.sync.product_sync.upsert_map")
     @patch("connector.sync.product_sync.create_log")
     @patch("connector.sync.product_sync._get_item_price")
+    @patch("connector.sync.product_sync._pull_magento_data_for_item")
     def test_push_existing_item_updates_product(
         self,
+        mock_pull,
         mock_price,
         mock_log,
         mock_upsert,
@@ -72,9 +93,10 @@ class TestProductSync(unittest.TestCase):
     ):
         """push_item_to_magento should call update_product when Magento already has the SKU."""
         mock_frappe.db.get_single_value.return_value = True
-        mock_frappe.get_doc.return_value = MagicMock(**MOCK_ITEM)
+        mock_frappe.get_doc.return_value = _mock_item()
         mock_frappe.get_single.return_value = MagicMock(price_list="Standard Selling")
         mock_price.return_value = 49.99
+        mock_pull.return_value = {}
 
         mock_client = MagicMock()
         mock_client.get_product.return_value = {
@@ -97,8 +119,10 @@ class TestProductSync(unittest.TestCase):
     @patch("connector.sync.product_sync.upsert_map")
     @patch("connector.sync.product_sync.create_log")
     @patch("connector.sync.product_sync._get_item_price")
+    @patch("connector.sync.product_sync._pull_magento_data_for_item")
     def test_push_preserves_magento_only_data(
         self,
+        mock_pull,
         mock_price,
         mock_log,
         mock_upsert,
@@ -112,12 +136,13 @@ class TestProductSync(unittest.TestCase):
         ERPNext's name/price must still win over whatever Magento currently has.
         """
         mock_frappe.db.get_single_value.return_value = True
-        mock_frappe.get_doc.return_value = MagicMock(**MOCK_ITEM)
+        mock_frappe.get_doc.return_value = _mock_item()
         mock_frappe.get_single.return_value = MagicMock(
             price_list="Standard Selling",
             magento_item_groups=[],
         )
         mock_price.return_value = 49.99
+        mock_pull.return_value = {}
 
         mock_client = MagicMock()
         mock_client.get_product.return_value = {
@@ -177,13 +202,87 @@ class TestProductSync(unittest.TestCase):
     def test_skips_item_with_sync_to_magento_false(self, mock_frappe):
         """push_item_to_magento should skip items with sync_to_magento=0."""
         mock_frappe.db.get_single_value.return_value = True
-        item = MagicMock(**{**MOCK_ITEM, "sync_to_magento": 0})
-        mock_frappe.get_doc.return_value = item
+        mock_frappe.get_doc.return_value = _mock_item(sync_to_magento=0)
 
         with patch("connector.sync.product_sync.MagentoClient") as mock_client_cls:
             from connector.sync.product_sync import push_item_to_magento
             push_item_to_magento("TEST-SKU-001")
             mock_client_cls.assert_not_called()
+
+    @patch("connector.sync.product_sync.disable_in_magento")
+    @patch("connector.sync.product_sync.get_magento_product_id")
+    @patch("connector.sync.product_sync.frappe")
+    def test_push_skips_disabled_item_and_disables_magento_if_mapped(
+        self, mock_frappe, mock_get_id, mock_disable
+    ):
+        """Disabled Items are not synced; mapped ones are disabled in Magento."""
+        mock_frappe.db.get_single_value.return_value = True
+        mock_frappe.db.exists.return_value = True
+        mock_get_id.return_value = 101
+        mock_frappe.get_doc.return_value = _mock_item(disabled=1)
+
+        from connector.sync.product_sync import push_item_to_magento
+        push_item_to_magento("TEST-SKU-001")
+
+        mock_disable.assert_called_once_with("TEST-SKU-001")
+
+    @patch("connector.sync.product_sync.get_magento_product_id")
+    @patch("connector.sync.product_sync.frappe")
+    def test_on_item_save_enqueues_disable_when_item_disabled(
+        self, mock_frappe, mock_get_id
+    ):
+        """Disabling a synced Item should enqueue Magento disable (not push)."""
+        mock_frappe.db.get_single_value.return_value = True
+        mock_frappe.db.exists.return_value = True
+        mock_get_id.return_value = 101
+        doc = MagicMock(item_code="TEST-SKU-001")
+        doc.get.side_effect = lambda key, *a, **k: {
+            "item_code": "TEST-SKU-001",
+            "name": "TEST-SKU-001",
+            "disabled": 1,
+            "sync_to_magento": 1,
+            "item_group": "Products",
+        }.get(key)
+
+        from connector.sync.product_sync import on_item_save
+        on_item_save(doc, "on_update")
+
+        mock_frappe.enqueue.assert_called_once()
+        kwargs = mock_frappe.enqueue.call_args.kwargs
+        self.assertEqual(kwargs.get("job_id"), "magento_disable_TEST-SKU-001")
+        self.assertEqual(
+            mock_frappe.enqueue.call_args.args[0],
+            "connector.sync.product_sync.disable_in_magento",
+        )
+
+    @patch("connector.sync.product_sync.create_log")
+    @patch("connector.sync.product_sync.get_magento_product_id")
+    @patch("connector.sync.product_sync.MagentoClient")
+    @patch("connector.sync.product_sync.frappe")
+    def test_disable_in_magento_sets_status_two(
+        self, mock_frappe, mock_client_cls, mock_get_id, mock_log
+    ):
+        """disable_in_magento must set Magento status=2 and keep the map."""
+        mock_frappe.db.get_single_value.return_value = True
+        mock_frappe.db.exists.return_value = True
+        mock_frappe.db.get_value.side_effect = [
+            1,  # Item.disabled check
+            {"magento_product_id": 101, "magento_sku": "TEST-SKU-001"},
+        ]
+        mock_get_id.return_value = 101
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+
+        from connector.sync.product_sync import disable_in_magento
+        disable_in_magento("TEST-SKU-001")
+
+        mock_client.update_product.assert_called_once_with(
+            "TEST-SKU-001", {"status": 2}
+        )
+        mock_frappe.delete_doc = getattr(mock_frappe, "delete_doc", MagicMock())
+        # Map must not be deleted in phase 1.
+        mock_log.assert_called()
+        self.assertEqual(mock_log.call_args.kwargs.get("operation"), "Disable in Magento")
 
     @patch("connector.sync.product_sync.frappe")
     def test_on_item_trash_enqueues_magento_removal(self, mock_frappe):
@@ -390,6 +489,23 @@ class TestGetItemsNeedingFullSync(unittest.TestCase):
         _get_items_needing_full_sync()
 
         self.assertEqual(captured_filters.get("item_group"), ["in", ["Books"]])
+        self.assertEqual(captured_filters.get("disabled"), 0)
+
+    @patch("connector.sync.product_sync.frappe")
+    def test_excludes_disabled_items(self, mock_frappe):
+        mock_frappe.get_single.return_value = MagicMock(magento_item_groups=[])
+        captured_filters = {}
+
+        def side_effect(doctype, **kwargs):
+            if doctype == "Item":
+                captured_filters.update(kwargs.get("filters") or {})
+            return []
+        mock_frappe.get_all.side_effect = side_effect
+
+        from connector.sync.product_sync import _get_items_needing_full_sync
+        _get_items_needing_full_sync()
+
+        self.assertEqual(captured_filters.get("disabled"), 0)
 
 
 class TestRunBatchProductSyncSoftDeadline(unittest.TestCase):

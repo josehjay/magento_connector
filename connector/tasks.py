@@ -132,6 +132,17 @@ def retry_failed_product_sync():
         frappe.log_error(frappe.get_traceback(), "Connector Scheduled: retry_failed_product_sync failed")
 
 
+def cleanup_disabled_products():
+    """Every 30 minutes: remove Magento products for Items disabled in ERPNext."""
+    if not _is_magento_enabled():
+        return
+    try:
+        from connector.sync.product_sync import cleanup_disabled_items_from_magento as _cleanup
+        _cleanup()
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Connector Scheduled: cleanup_disabled_products failed")
+
+
 def sync_attribute_options():
     """Hourly: push newly-added values for already-mapped attributes (additive-only)."""
     if not _is_magento_enabled():

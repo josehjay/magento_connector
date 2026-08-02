@@ -65,6 +65,19 @@ def sync_inventory():
     mapped_dict = {row["item_code"]: row["magento_sku"] for row in mapped_items}
     item_codes = list(mapped_dict.keys())
 
+    # Never push stock for disabled ERPNext Items.
+    enabled_codes = set(
+        frappe.get_all(
+            "Item",
+            filters={"name": ["in", item_codes], "disabled": 0},
+            pluck="name",
+        )
+    )
+    mapped_dict = {code: sku for code, sku in mapped_dict.items() if code in enabled_codes}
+    item_codes = list(mapped_dict.keys())
+    if not item_codes:
+        return
+
     bin_data = frappe.db.sql(
         """
         SELECT item_code, SUM(actual_qty) AS total_qty

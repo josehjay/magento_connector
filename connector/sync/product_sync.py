@@ -4,11 +4,17 @@ Product Sync: ERPNext Item → Magento Product
 Triggered by:
   - Item.after_insert / Item.on_update  (real-time, deduplicated by job_name)
   - Item.on_trash                       (delete Magento product + map)
+  - Item disabled                       (disable Magento now; remove on 30-min cleanup)
   - tasks.full_product_sync()           (hourly catch-up in batches; also "Sync All Products Now")
   - tasks.retry_failed_product_sync()   (every 30 min, Pending + Failed with backoff)
+  - tasks.cleanup_disabled_products()   (every 30 min, remove Magento products for disabled Items)
 
-full_product_sync() only pushes items that aren't already "Synced" in the
-Magento Product Map (never synced, "Pending", "Failed"-and-not-exhausted, or
+Disabled Items are never pushed. If an Item is disabled after being synced,
+Magento is disabled immediately and the product is removed on the next
+cleanup pass (so a quick re-enable can still undo retirement).
+
+full_product_sync() only pushes enabled items that aren't already "Synced" in
+the Magento Product Map (never synced, "Pending", "Failed"-and-not-exhausted, or
 "Synced" but edited in ERPNext since) — it complements Rebuild Product Maps
 rather than re-pushing everything that tool already restored.
 
@@ -53,7 +59,12 @@ BATCH_JOB_TIMEOUT = 900
 
 def _enqueue_product_job(method_path, item_code, timeout=120):
     """Enqueue a product sync job with consistent defaults."""
-    job_prefix = "magento_remove_" if "remove_from_magento" in method_path else "magento_product_sync_"
+    if "remove_from_magento" in method_path:
+        job_prefix = "magento_remove_"
+    elif "disable_in_magento" in method_path:
+        job_prefix = "magento_disable_"
+    else:
+        job_prefix = "magento_product_sync_"
     frappe.enqueue(
         method_path,
         queue="default",
@@ -67,8 +78,8 @@ def _enqueue_product_job(method_path, item_code, timeout=120):
 
 def _enqueue_product_sync(item_code, mode):
     """
-    Queue a product push or removal so it runs in a background worker
-    AFTER the current transaction commits.
+    Queue a product push, Magento disable, or removal so it runs in a
+    background worker AFTER the current transaction commits.
 
     Doing the Magento API calls inline (inside an `after_commit` callback)
     holds the user's save HTTP request open while Magento is contacted.
@@ -78,17 +89,20 @@ def _enqueue_product_sync(item_code, mode):
     Always enqueueing keeps saves instant and isolates Magento failures
     from the user's request.
     """
-    if mode not in ("push", "remove"):
+    method_by_mode = {
+        "push": ("connector.sync.product_sync.push_item_to_magento", 120),
+        "disable": ("connector.sync.product_sync.disable_in_magento", 60),
+        "remove": ("connector.sync.product_sync.remove_from_magento", 60),
+    }
+    if mode not in method_by_mode:
         return
 
-    method_path = (
-        "connector.sync.product_sync.push_item_to_magento"
-        if mode == "push"
-        else "connector.sync.product_sync.remove_from_magento"
-    )
-    timeout = 120 if mode == "push" else 60
-
+    method_path, timeout = method_by_mode[mode]
     _enqueue_product_job(method_path, item_code, timeout=timeout)
+
+
+def _has_magento_map(item_code):
+    return bool(frappe.db.exists("Magento Product Map", item_code))
 
 
 def _is_magento_enabled():
@@ -331,8 +345,10 @@ def _safe_hook(label):
 def on_item_save(doc, method):
     """
     Hook: Item after_insert / on_update.
+    - Disabled Item with an existing Magento map → disable in Magento now;
+      scheduled cleanup later removes the Magento product + map.
     - Deselected sync_to_magento → enqueue removal from Magento and map.
-    - Enabled sync_to_magento + allowed group → enqueue a push to Magento.
+    - Enabled sync_to_magento + allowed group + not disabled → enqueue push.
 
     The actual Magento API calls run in a background worker (deduplicated
     by item_code) AFTER the current ERPNext transaction commits. This keeps
@@ -346,8 +362,15 @@ def on_item_save(doc, method):
     if not item_code:
         return
 
+    if doc.get("disabled"):
+        # Never push disabled Items. If already synced, disable Magento first;
+        # cleanup_disabled_items_from_magento() removes them later.
+        if _has_magento_map(item_code) or get_magento_product_id(item_code):
+            _enqueue_product_sync(item_code, mode="disable")
+        return
+
     if not doc.get("sync_to_magento"):
-        if get_magento_product_id(item_code):
+        if get_magento_product_id(item_code) or _has_magento_map(item_code):
             _enqueue_product_sync(item_code, mode="remove")
         return
 
@@ -406,12 +429,166 @@ def on_item_price_change(doc, method):
     if not doc.get("selling"):
         return
 
+    if frappe.db.get_value("Item", item_code, "disabled"):
+        return
+
     _enqueue_product_sync(item_code, mode="push")
 
 
 # ---------------------------------------------------------------------------
-# Remove product from Magento
+# Disable / remove product from Magento
 # ---------------------------------------------------------------------------
+
+def disable_in_magento(item_code):
+    """
+    Phase 1 when an ERPNext Item is disabled after it was synced:
+    set Magento product status to Disabled (2) and keep the map row.
+
+    Phase 2 (delete Magento product + clear map) is handled later by
+    cleanup_disabled_items_from_magento() on the 30-minute schedule — so an
+    accidental disable can still be undone by re-enabling before cleanup.
+    """
+    if not _is_magento_enabled():
+        return
+
+    # Job may have been queued before the user re-enabled the Item.
+    if frappe.db.exists("Item", item_code) and not frappe.db.get_value(
+        "Item", item_code, "disabled"
+    ):
+        frappe.logger("connector").info(
+            f"disable_in_magento: Item '{item_code}' is no longer disabled; skipping."
+        )
+        return
+
+    map_row = frappe.db.get_value(
+        "Magento Product Map",
+        item_code,
+        ["magento_product_id", "magento_sku"],
+        as_dict=True,
+    ) or {}
+    magento_id = map_row.get("magento_product_id") or get_magento_product_id(item_code)
+    sku = (map_row.get("magento_sku") or item_code or "").strip() or item_code
+
+    if not magento_id and not map_row:
+        return
+
+    if magento_id:
+        try:
+            client = MagentoClient()
+            try:
+                client.update_product(sku, {"status": 2})
+            except MagentoAPIError as e:
+                if e.status_code == 404:
+                    # Already gone in Magento — drop the orphan map now.
+                    delete_map(item_code)
+                    if frappe.db.exists("Item", item_code):
+                        frappe.db.set_value(
+                            "Item",
+                            item_code,
+                            {
+                                "magento_product_id": None,
+                                "magento_last_synced_on": None,
+                                "magento_sync_error": "",
+                            },
+                        )
+                    frappe.db.commit()
+                    create_log(
+                        operation="Disable in Magento",
+                        status="Success",
+                        doctype_name="Item",
+                        document_name=item_code,
+                        magento_id=magento_id,
+                        error_message="Product already absent in Magento; map cleared.",
+                    )
+                    return
+                raise
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "Connector: Disable in Magento")
+            create_log(
+                operation="Disable in Magento",
+                status="Failed",
+                doctype_name="Item",
+                document_name=item_code,
+                magento_id=magento_id,
+                error_message="Failed to disable Magento product; will retry on cleanup.",
+            )
+            return
+
+    frappe.db.commit()
+    create_log(
+        operation="Disable in Magento",
+        status="Success",
+        doctype_name="Item",
+        document_name=item_code,
+        magento_id=magento_id,
+    )
+    frappe.logger("connector").info(
+        f"disable_in_magento: Magento product for '{item_code}' set to disabled; "
+        "removal deferred to cleanup job."
+    )
+
+
+def cleanup_disabled_items_from_magento():
+    """
+    Phase 2: remove Magento products for ERPNext Items that are still disabled
+    and still have a Magento Product Map row. Runs in batches so Magento is
+    not flooded; leftovers are picked up on the next scheduled run.
+    """
+    if not _is_magento_enabled():
+        return
+
+    rows = frappe.db.sql(
+        """
+        SELECT m.item_code
+        FROM `tabMagento Product Map` m
+        INNER JOIN `tabItem` i ON i.name = m.item_code
+        WHERE i.disabled = 1
+        ORDER BY m.modified ASC
+        LIMIT %(limit)s
+        """,
+        {"limit": BATCH_SIZE},
+        as_dict=True,
+    )
+    if not rows:
+        return
+
+    item_codes = [row["item_code"] for row in rows]
+    frappe.enqueue(
+        "connector.sync.product_sync._run_batch_disabled_cleanup",
+        queue="long",
+        timeout=BATCH_JOB_TIMEOUT,
+        job_id="magento_cleanup_disabled",
+        deduplicate=True,
+        enqueue_after_commit=True,
+        item_codes=item_codes,
+    )
+    frappe.logger("connector").info(
+        f"cleanup_disabled_items_from_magento: enqueued removal for {len(item_codes)} disabled item(s)."
+    )
+
+
+def _run_batch_disabled_cleanup(item_codes):
+    """Remove Magento products for a batch of disabled ERPNext items."""
+    logger = frappe.logger("connector")
+    removed = 0
+    for item_code in item_codes or []:
+        try:
+            # Skip if the Item was re-enabled since enqueue.
+            if frappe.db.exists("Item", item_code) and not frappe.db.get_value(
+                "Item", item_code, "disabled"
+            ):
+                continue
+            remove_from_magento(item_code)
+            removed += 1
+        except Exception as e:
+            frappe.log_error(
+                f"Disabled cleanup failed for {item_code}: {e}",
+                "Connector Disabled Item Cleanup",
+            )
+    logger.info(
+        f"_run_batch_disabled_cleanup: removed {removed} of {len(item_codes or [])} item(s)."
+    )
+
 
 def remove_from_magento(item_code):
     """
@@ -495,6 +672,13 @@ def push_item_to_magento(item_code):
         return
 
     doc = frappe.get_doc("Item", item_code)
+
+    if doc.get("disabled"):
+        # Disabled Items are never synced. If Magento still has them, disable
+        # immediately; scheduled cleanup removes them later.
+        if _has_magento_map(item_code) or get_magento_product_id(item_code):
+            disable_in_magento(item_code)
+        return
 
     if not doc.get("sync_to_magento"):
         return
@@ -860,7 +1044,7 @@ def _get_items_needing_full_sync():
     this tool complements the rebuild tool instead of re-pushing everything
     it just restored.
     """
-    filters = {"sync_to_magento": 1}
+    filters = {"sync_to_magento": 1, "disabled": 0}
     allowed_groups = _get_allowed_item_groups()
     if allowed_groups:
         filters["item_group"] = ["in", list(allowed_groups)]
@@ -1045,10 +1229,11 @@ def retry_failed_product_sync():
     if not due:
         return
 
-    # Only retry items that still want to be synced and are still within an
-    # allowed Item Group — a group removed from "Item Groups to Sync" after
-    # an item failed should stop being retried, not loop forever.
-    valid_filters = {"item_code": ["in", due], "sync_to_magento": 1}
+    # Only retry items that still want to be synced, are enabled, and are still
+    # within an allowed Item Group — a group removed from "Item Groups to Sync"
+    # after an item failed should stop being retried, not loop forever.
+    # Disabled items are handled by cleanup_disabled_items_from_magento().
+    valid_filters = {"item_code": ["in", due], "sync_to_magento": 1, "disabled": 0}
     allowed_groups = _get_allowed_item_groups()
     if allowed_groups:
         valid_filters["item_group"] = ["in", list(allowed_groups)]

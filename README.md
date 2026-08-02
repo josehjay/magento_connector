@@ -14,6 +14,7 @@ Each integration module can be independently enabled or disabled from **Connecto
 | Data | Direction | Trigger |
 |------|-----------|---------|
 | Products (name, price, description, status, weight) | ERPNext → Magento | Real-time on Item save + hourly batch catch-up + every-30-min Pending/Failed map check |
+| Product disables | ERPNext → Magento | Disable Magento immediately; remove Magento product within ~30 minutes |
 | Product deletes | ERPNext → Magento | Real-time on Item trash (ERPNext is source of truth) |
 | Inventory (sum of all warehouses) | ERPNext → Magento | Every 15 minutes |
 | Base product image URL | Magento → ERPNext (`item_image`) | Every 30 minutes |
@@ -167,6 +168,7 @@ Go to **Connector Settings** in the desk search bar:
 - The item is automatically pushed to Magento on save
 - Use the **Magento → Push to Magento** button for manual push
 - Deleting an Item in ERPNext deletes (or disables) it in Magento and clears the map
+- Disabling an Item skips all further sync; Magento is disabled immediately, then removed on the next 30-minute cleanup
 - Catch-up runs **hourly in batches** (Pending / Failed / unsynced). Every **30 minutes** the Magento Product Map is re-checked for Pending and Failed rows
 - Open **Connector** in the desk sidebar for **Magento Product Map**, settings, and sync logs
 

@@ -44,10 +44,10 @@ def _progress_cache_key(run_id):
 
 def _get_eligible_items():
     """
-    Items with sync_to_magento enabled, respecting Magento Settings item groups.
-    Templates (has_variants) are listed before variants/simple items.
+    Items with sync_to_magento enabled and not disabled, respecting Magento
+    Settings item groups. Templates (has_variants) are listed before variants.
     """
-    filters = {"sync_to_magento": 1}
+    filters = {"sync_to_magento": 1, "disabled": 0}
     allowed_groups = _get_allowed_item_groups()
     if allowed_groups:
         filters["item_group"] = ["in", list(allowed_groups)]
