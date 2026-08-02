@@ -51,6 +51,7 @@
    "fieldname": "sync_status",
    "fieldtype": "Select",
    "in_list_view": 1,
+   "in_standard_filter": 1,
    "label": "Sync Status",
    "options": "Synced\nFailed\nPending"
   },

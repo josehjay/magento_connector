@@ -1,0 +1,164 @@
+{
+ "charts": [],
+ "content": "[{\"id\":\"conn_hdr\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Connector</b></span>\",\"col\":12}},{\"id\":\"conn_sc\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Magento Product Map\",\"col\":4}},{\"id\":\"conn_sc2\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Magento Settings\",\"col\":4}},{\"id\":\"conn_sc3\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Magento Sync Log\",\"col\":4}},{\"id\":\"conn_sp\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"conn_hdr2\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\">Masters &amp; Maps</span>\",\"col\":12}},{\"id\":\"conn_c1\",\"type\":\"card\",\"data\":{\"card_name\":\"Magento\",\"col\":4}},{\"id\":\"conn_c2\",\"type\":\"card\",\"data\":{\"card_name\":\"ERPNext Sites\",\"col\":4}},{\"id\":\"conn_c3\",\"type\":\"card\",\"data\":{\"card_name\":\"Settings\",\"col\":4}}]",
+ "creation": "2026-08-02 00:00:00.000000",
+ "custom_blocks": [],
+ "docstatus": 0,
+ "doctype": "Workspace",
+ "for_user": "",
+ "hide_custom": 0,
+ "icon": "integration",
+ "idx": 0,
+ "is_hidden": 0,
+ "label": "Connector",
+ "links": [
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Magento",
+   "link_count": 5,
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Magento Product Map",
+   "link_count": 0,
+   "link_to": "Magento Product Map",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Magento Order Map",
+   "link_count": 0,
+   "link_to": "Magento Order Map",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Magento Attribute Mapping",
+   "link_count": 0,
+   "link_to": "Magento Attribute Mapping",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Magento Sync Log",
+   "link_count": 0,
+   "link_to": "Magento Sync Log",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Magento Settings",
+   "link_count": 0,
+   "link_to": "Magento Settings",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "ERPNext Sites",
+   "link_count": 2,
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Remote ERPNext Site",
+   "link_count": 0,
+   "link_to": "Remote ERPNext Site",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Remote Site Product Map",
+   "link_count": 0,
+   "link_to": "Remote Site Product Map",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Settings",
+   "link_count": 1,
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Connector Settings",
+   "link_count": 0,
+   "link_to": "Connector Settings",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  }
+ ],
+ "modified": "2026-08-02 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Connector",
+ "name": "Connector",
+ "number_cards": [],
+ "owner": "Administrator",
+ "parent_page": "",
+ "public": 1,
+ "quick_lists": [],
+ "restrict_to_domain": "",
+ "roles": [],
+ "sequence_id": 25.0,
+ "shortcuts": [
+  {
+   "color": "Blue",
+   "doc_view": "List",
+   "label": "Magento Product Map",
+   "link_to": "Magento Product Map",
+   "type": "DocType"
+  },
+  {
+   "color": "Grey",
+   "doc_view": "List",
+   "label": "Magento Settings",
+   "link_to": "Magento Settings",
+   "type": "DocType"
+  },
+  {
+   "color": "Grey",
+   "doc_view": "List",
+   "label": "Magento Sync Log",
+   "link_to": "Magento Sync Log",
+   "type": "DocType"
+  }
+ ],
+ "title": "Connector"
+}

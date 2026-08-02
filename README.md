@@ -13,7 +13,8 @@ Each integration module can be independently enabled or disabled from **Connecto
 
 | Data | Direction | Trigger |
 |------|-----------|---------|
-| Products (name, price, description, status, weight) | ERPNext → Magento | Real-time on Item save + hourly catch-up |
+| Products (name, price, description, status, weight) | ERPNext → Magento | Real-time on Item save + hourly batch catch-up + every-30-min Pending/Failed map check |
+| Product deletes | ERPNext → Magento | Real-time on Item trash (ERPNext is source of truth) |
 | Inventory (sum of all warehouses) | ERPNext → Magento | Every 15 minutes |
 | Base product image URL | Magento → ERPNext (`item_image`) | Every 30 minutes |
 | Orders (new + updated) | Magento → ERPNext (Draft SO) | Every 10 minutes |
@@ -67,7 +68,7 @@ git pull
 cd ../..
 
 # 2) Reinstall Python package for this app (picks up new modules)
-bench setup requirements --app connector
+bench setup requirements connector
 # or: ./env/bin/pip install -e apps/connector --quiet
 
 # 3) Run patches / schema for this site
@@ -163,6 +164,9 @@ Go to **Connector Settings** in the desk search bar:
 - Check **Sync to Magento** on the Item form (defaults to checked)
 - The item is automatically pushed to Magento on save
 - Use the **Magento → Push to Magento** button for manual push
+- Deleting an Item in ERPNext deletes (or disables) it in Magento and clears the map
+- Catch-up runs **hourly in batches** (Pending / Failed / unsynced). Every **30 minutes** the Magento Product Map is re-checked for Pending and Failed rows
+- Open **Connector** in the desk sidebar for **Magento Product Map**, settings, and sync logs
 
 ### Products (ERPNext Sites)
 - Check **Sync to ERPNext Sites** on the Item form
@@ -188,9 +192,10 @@ Go to **Connector Settings** in the desk search bar:
 
 ## Monitoring
 
+- **Connector** workspace (desk sidebar) — Magento Product Map, Magento Settings, sync logs
 - **Magento Sync Log** — shows all sync operations (Magento and ERPNext site sync) with status
 - **Remote Site Product Map** — per-item per-site sync status and last sync time
-- **Magento Product Map** — per-item Magento sync status
+- **Magento Product Map** — per-item Magento sync status (filter by Pending / Failed / Synced)
 - **Scheduled Job Log** — Frappe's built-in scheduler log
 - **Error Log** — Frappe's error log for unhandled exceptions
 

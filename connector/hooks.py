@@ -95,19 +95,16 @@ scheduler_events = {
         "*/10 * * * *": [
             "connector.tasks.erpnext_product_sync",
         ],
-        # Magento full product sync once daily at 1 AM
-        "0 1 * * *": [
+        # Magento product catch-up every hour — Pending / Failed / unsynced
+        # items in batches (chunked so Magento is never flooded).
+        "0 * * * *": [
             "connector.tasks.full_product_sync",
+            "connector.tasks.sync_attribute_options",
         ],
-        # Image URL sync and retry failed products every 30 minutes
+        # Image URL sync + Magento Product Map Pending/Failed batch every 30 min
         "*/30 * * * *": [
             "connector.tasks.sync_images",
             "connector.tasks.retry_failed_product_sync",
-        ],
-        # Push newly-added values for already-mapped attributes every hour
-        # (catch-up for the real-time hook; never touches unmapped attributes).
-        "0 * * * *": [
-            "connector.tasks.sync_attribute_options",
         ],
     }
 }

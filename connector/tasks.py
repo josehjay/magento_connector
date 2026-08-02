@@ -99,14 +99,16 @@ def sync_images():
 
 
 def full_product_sync():
-    """Daily: push all stale/unsynced ERPNext items to Magento.
+    """Hourly: push Pending / Failed / unsynced ERPNext items to Magento in batches.
 
     Skips if a full-sync chunk or retry job is already running.
     """
     if not _is_magento_enabled():
         return
 
-    if _is_job_running("magento_full_product_sync") or _is_job_running("magento_retry_failed_sync"):
+    from connector.sync.product_sync import is_full_product_sync_running
+
+    if is_full_product_sync_running() or _is_job_running("magento_retry_failed_sync"):
         frappe.logger("connector").info(
             "full_product_sync: existing Magento product sync job running; skipping."
         )
@@ -120,7 +122,7 @@ def full_product_sync():
 
 
 def retry_failed_product_sync():
-    """Every 30 minutes: retry products that failed their last sync (exponential backoff)."""
+    """Every 30 minutes: batch-retry Pending/Failed Magento Product Map rows."""
     if not _is_magento_enabled():
         return
     try:

@@ -186,13 +186,16 @@ class TestProductSync(unittest.TestCase):
             mock_client_cls.assert_not_called()
 
     @patch("connector.sync.product_sync.frappe")
-    @patch("connector.sync.product_sync.get_magento_product_id")
-    def test_on_item_trash_enqueues_magento_removal(self, mock_get_id, mock_frappe):
+    def test_on_item_trash_enqueues_magento_removal(self, mock_frappe):
         """on_item_trash should enqueue a Magento removal job after commit."""
         mock_frappe.db.get_single_value.return_value = True
-        mock_get_id.return_value = 101
+        mock_frappe.db.exists.return_value = True
         doc = MagicMock(item_code="TEST-SKU-001")
-        doc.get.return_value = 1
+        doc.get.side_effect = lambda key, *a, **k: {
+            "item_code": "TEST-SKU-001",
+            "name": "TEST-SKU-001",
+            "sync_to_magento": 1,
+        }.get(key, 1)
 
         from connector.sync.product_sync import on_item_trash
         on_item_trash(doc, "on_trash")
@@ -225,7 +228,11 @@ class TestProductSync(unittest.TestCase):
         mock_get_id.return_value = 101
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
-        mock_frappe.db.exists.return_value = False
+        mock_frappe.db.get_value.return_value = {
+            "magento_product_id": 101,
+            "magento_sku": "TEST-SKU-001",
+        }
+        mock_frappe.db.exists.side_effect = lambda dt, name: dt == "Magento Product Map"
 
         from connector.sync.product_sync import remove_from_magento
         remove_from_magento("TEST-SKU-001")
@@ -233,6 +240,36 @@ class TestProductSync(unittest.TestCase):
         mock_client.delete_product.assert_called_once_with("TEST-SKU-001")
         mock_frappe.db.set_value.assert_not_called()
         mock_frappe.db.commit.assert_called_once()
+        mock_delete_map.assert_called_once_with("TEST-SKU-001")
+
+    @patch("connector.sync.product_sync.frappe")
+    @patch("connector.sync.product_sync.delete_map")
+    @patch("connector.sync.product_sync.get_magento_product_id")
+    @patch("connector.sync.product_sync.create_log")
+    @patch("connector.sync.product_sync.MagentoClient")
+    def test_remove_from_magento_uses_mapped_sku(
+        self,
+        mock_client_cls,
+        mock_log,
+        mock_get_id,
+        mock_delete_map,
+        mock_frappe,
+    ):
+        """Deletion must use magento_sku from the map when it differs from item_code."""
+        mock_get_id.return_value = 55
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_frappe.db.get_value.return_value = {
+            "magento_product_id": 55,
+            "magento_sku": "ALT-SKU",
+        }
+        mock_frappe.db.exists.return_value = False
+
+        from connector.sync.product_sync import remove_from_magento
+        remove_from_magento("TEST-SKU-001")
+
+        mock_client.delete_product.assert_called_once_with("ALT-SKU")
+        mock_delete_map.assert_called_once_with("TEST-SKU-001")
 
 
 class TestGetItemsNeedingFullSync(unittest.TestCase):
@@ -410,7 +447,10 @@ class TestRetryFailedProductSyncItemGroupFilter(unittest.TestCase):
 
         def side_effect(doctype, **kwargs):
             if doctype == "Magento Product Map":
-                return [{"item_code": "A", "retry_count": 1, "last_failed_at": None}]
+                filters = kwargs.get("filters") or {}
+                if filters.get("sync_status") == "Failed":
+                    return [{"item_code": "A", "retry_count": 1, "last_failed_at": None}]
+                return []  # no Pending
             if doctype == "Item":
                 captured_item_filters.update(kwargs.get("filters") or {})
                 return []  # "A" is not in an allowed group -> filtered out
@@ -422,6 +462,69 @@ class TestRetryFailedProductSyncItemGroupFilter(unittest.TestCase):
 
         self.assertEqual(captured_item_filters.get("item_group"), ["in", ["Books"]])
         mock_frappe.enqueue.assert_not_called()
+
+    @patch("connector.sync.product_sync.frappe")
+    def test_includes_pending_map_rows(self, mock_frappe):
+        mock_frappe.get_single.return_value = MagicMock(magento_item_groups=[])
+        mock_frappe.utils.now_datetime.return_value = "2026-01-01 00:00:00"
+        mock_frappe.utils.add_to_date.side_effect = lambda *a, **k: "2099-01-01"
+
+        def side_effect(doctype, **kwargs):
+            if doctype == "Magento Product Map":
+                filters = kwargs.get("filters") or {}
+                if filters.get("sync_status") == "Failed":
+                    return []
+                if filters.get("sync_status") == "Pending":
+                    return [{"item_code": "PENDING-1"}]
+                return []
+            if doctype == "Item":
+                return [{"item_code": "PENDING-1"}] if "pluck" not in kwargs else ["PENDING-1"]
+            return []
+        mock_frappe.get_all.side_effect = side_effect
+
+        from connector.sync.product_sync import retry_failed_product_sync
+        retry_failed_product_sync()
+
+        mock_frappe.enqueue.assert_called_once()
+        self.assertEqual(
+            mock_frappe.enqueue.call_args.kwargs.get("item_codes"),
+            ["PENDING-1"],
+        )
+
+
+class TestFullProductSyncChunkChaining(unittest.TestCase):
+    """Follow-up chunks must use unique job_ids so deduplicate doesn't drop them."""
+
+    @patch("connector.sync.product_sync._run_batch_product_sync")
+    @patch("connector.sync.product_sync._get_items_needing_full_sync")
+    @patch("connector.sync.product_sync.frappe")
+    def test_enqueues_next_chunk_with_unique_job_id(
+        self, mock_frappe, mock_needs, mock_batch
+    ):
+        mock_frappe.db.get_single_value.return_value = True
+        mock_frappe.cache.return_value.set_value = MagicMock()
+        mock_frappe.cache.return_value.delete_value = MagicMock()
+        # First call (before process): 25 items; second call (after): 5 remain.
+        mock_needs.side_effect = [
+            [f"I{i}" for i in range(25)],
+            [f"I{i}" for i in range(5)],
+        ]
+
+        from connector.sync.product_sync import (
+            BATCH_SIZE,
+            run_full_product_sync_chunk,
+            _full_sync_chunk_job_id,
+        )
+
+        run_full_product_sync_chunk(chunk_no=0)
+
+        mock_batch.assert_called_once()
+        self.assertEqual(len(mock_batch.call_args.args[0]), BATCH_SIZE)
+        mock_frappe.enqueue.assert_called_once()
+        kwargs = mock_frappe.enqueue.call_args.kwargs
+        self.assertEqual(kwargs.get("job_id"), _full_sync_chunk_job_id(1))
+        self.assertEqual(kwargs.get("chunk_no"), 1)
+        self.assertTrue(kwargs.get("deduplicate"))
 
 
 if __name__ == "__main__":
