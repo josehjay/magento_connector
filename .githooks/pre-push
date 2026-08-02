@@ -1,8 +1,8 @@
 #!/bin/sh
 # Auto-bump app version before every push to a remote.
-# If HEAD is already a version-bump commit, the push proceeds normally.
-# Otherwise this creates the bump commit, re-pushes, and aborts the original
-# push so the remote never receives a tip without the new version.
+# Prefer one-step pushes via `alias.push` (see scripts/install_git_hooks.py).
+# This hook is a safety net: if HEAD is not yet a version-bump commit, it
+# creates one and aborts so the next push publishes the bump tip cleanly.
 
 set -e
 
@@ -53,20 +53,12 @@ fi
 tip_msg="$(git log -1 --pretty=%s 2>/dev/null || true)"
 case "$tip_msg" in
 	"chore: bump version to "*)
+		echo "pre-push: version bump commit created; push again to publish it" >&2
+		echo "pre-push: tip for a one-step push: python scripts/install_git_hooks.py" >&2
+		exit 1
 		;;
 	*)
 		# No bump commit was created (noop / in-progress git state).
 		exit 0
 		;;
 esac
-
-branch="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
-if [ -z "$branch" ]; then
-	echo "pre-push: detached HEAD after version bump; push manually" >&2
-	exit 1
-fi
-
-echo "pre-push: re-pushing $branch to $remote with version bump..." >&2
-CUSTOM_VERSION_BUMPED=1 git push "$remote" "refs/heads/$branch"
-# Abort the original push (it would target the pre-bump SHA).
-exit 1

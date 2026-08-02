@@ -99,11 +99,13 @@ Notes:
 
 Every `git push` / remote sync bumps the patch version (`connector/__init__.py` and `setup.py`) and commits `chore: bump version to X.Y.Z`.
 
-After cloning, enable the git hook once:
+After cloning, enable the git hook and one-step push alias once:
 
 ```bash
 python scripts/install_git_hooks.py
 ```
+
+That sets `core.hooksPath=.githooks` and `alias.push` so a single `git push` bumps then publishes with a normal success exit code.
 
 Skip a bump when needed: `SKIP_VERSION_BUMP=1 git push`.
 
