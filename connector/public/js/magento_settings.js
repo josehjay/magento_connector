@@ -864,14 +864,24 @@
             }, __("Status"));
 
             // ── Maintenance group ────────────────────────────────────────
-            frm.add_custom_button(__("Purge Old Logs (30d)"), function () {
+            frm.add_custom_button(__("Clean Sync Logs Now"), function () {
+                var allDays = cint(frm.doc.sync_log_retention_days) || 30;
+                var successDays = cint(frm.doc.success_log_retention_days) || 7;
                 frappe.confirm(
-                    __("Delete all Magento Sync Log entries older than 30 days?"),
+                    __(
+                        "Run Magento Sync Log cleanup using current settings?<br><br>" +
+                        "• Scrub request/response payloads from Success rows<br>" +
+                        "• Delete Success/Skipped older than {0} day(s)<br>" +
+                        "• Delete all statuses older than {1} day(s)<br><br>" +
+                        "Save Magento Settings first if you just changed retention values.",
+                        [successDays, allDays]
+                    ),
                     function () {
                         frappe.call({
                             doc: frm.doc,
                             method: "purge_old_logs",
-                            args: { days: 30 },
+                            freeze: true,
+                            freeze_message: __("Cleaning Magento Sync Logs…"),
                         });
                     }
                 );

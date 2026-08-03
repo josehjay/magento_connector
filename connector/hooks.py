@@ -108,6 +108,10 @@ scheduler_events = {
             "connector.tasks.retry_failed_product_sync",
             "connector.tasks.cleanup_disabled_products",
         ],
+        # Magento Sync Log retention — scrub payloads + delete old rows daily
+        "30 2 * * *": [
+            "connector.tasks.cleanup_sync_logs",
+        ],
     }
 }
 

@@ -143,6 +143,31 @@ def cleanup_disabled_products():
         frappe.log_error(frappe.get_traceback(), "Connector Scheduled: cleanup_disabled_products failed")
 
 
+def cleanup_sync_logs():
+    """Daily: scrub bulky Success payloads and delete Magento Sync Logs past retention."""
+    if not _is_magento_enabled():
+        return
+
+    job_id = "connector_sync_log_cleanup"
+    if _is_job_running(job_id):
+        frappe.logger("connector").info(
+            "cleanup_sync_logs: cleanup job already running; skipping."
+        )
+        return
+
+    try:
+        frappe.enqueue(
+            "connector.connector.doctype.magento_sync_log.magento_sync_log.cleanup_sync_logs",
+            queue="long",
+            timeout=1800,
+            job_id=job_id,
+            deduplicate=True,
+        )
+        frappe.logger("connector").info("cleanup_sync_logs: enqueued sync log cleanup job.")
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Connector Scheduled: cleanup_sync_logs failed")
+
+
 def sync_attribute_options():
     """Hourly: push newly-added values for already-mapped attributes (additive-only)."""
     if not _is_magento_enabled():

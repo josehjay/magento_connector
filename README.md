@@ -197,7 +197,8 @@ Go to **Connector Settings** in the desk search bar:
 ## Monitoring
 
 - **Connector** workspace (desk sidebar) — Magento Product Map, Magento Settings, sync logs
-- **Magento Sync Log** — shows all sync operations (Magento and ERPNext site sync) with status
+- **Magento Sync Log** — operation history (Success logs omit bulky payloads by default)
+- **Sync Log Cleanup** (Magento Settings) — retention defaults: Success 7 days, all statuses 30 days; daily job at 02:30; **Maintenance → Clean Sync Logs Now**
 - **Remote Site Product Map** — per-item per-site sync status and last sync time
 - **Magento Product Map** — per-item Magento sync status (filter by Pending / Failed / Synced)
 - **Scheduled Job Log** — Frappe's built-in scheduler log

@@ -29,7 +29,12 @@
   "last_order_sync_time",
   "column_break_3",
   "token_expiry",
-  "cached_token"
+  "cached_token",
+  "logging_section",
+  "sync_log_retention_days",
+  "success_log_retention_days",
+  "column_break_logging",
+  "store_success_payloads"
  ],
  "fields": [
   {
@@ -183,6 +188,37 @@
    "label": "Cached Admin Token",
    "read_only": 1,
    "hidden": 1
+  },
+  {
+   "fieldname": "logging_section",
+   "fieldtype": "Section Break",
+   "label": "Sync Log Cleanup",
+   "description": "Controls Magento Sync Log retention. Scheduled daily cleanup deletes old rows and strips bulky payloads from success logs."
+  },
+  {
+   "default": "30",
+   "fieldname": "sync_log_retention_days",
+   "fieldtype": "Int",
+   "label": "Keep All Logs (Days)",
+   "description": "Delete any Magento Sync Log older than this many days (Success, Failed, Skipped)."
+  },
+  {
+   "default": "7",
+   "fieldname": "success_log_retention_days",
+   "fieldtype": "Int",
+   "label": "Keep Success Logs (Days)",
+   "description": "Delete successful / skipped logs sooner than failed ones. Must be ≤ Keep All Logs."
+  },
+  {
+   "fieldname": "column_break_logging",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "store_success_payloads",
+   "fieldtype": "Check",
+   "label": "Store Payloads on Success",
+   "description": "When unchecked (recommended), Success logs only store operation summary — not request/response bodies. Failed logs always keep truncated payloads for debugging."
   }
  ],
  "issingle": 1,

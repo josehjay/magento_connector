@@ -596,17 +596,44 @@ class MagentoSettings(Document):
         )
 
     @frappe.whitelist()
-    def purge_old_logs(self, days=30):
-        """Delete Magento Sync Log entries older than `days` days."""
-        days = int(days or 30)
-        from frappe.utils import add_days, nowdate
-        cutoff = add_days(nowdate(), -days)
-        deleted = frappe.db.delete("Magento Sync Log", {"synced_on": ["<", cutoff]})
-        frappe.db.commit()
-        frappe.msgprint(
-            f"Deleted sync logs older than {days} days (cutoff: {cutoff}).",
-            indicator="green",
+    def purge_old_logs(self, days=None, success_days=None):
+        """
+        Run Magento Sync Log cleanup now.
+
+        Uses Magento Settings retention when days are not passed.
+        Explicit `days` overrides absolute retention; `success_days` overrides
+        success/skipped retention.
+        """
+        from connector.connector.doctype.magento_sync_log.magento_sync_log import (
+            cleanup_sync_logs,
+            get_sync_log_stats,
         )
+
+        kwargs = {}
+        if days is not None and str(days).strip() != "":
+            kwargs["all_retention_days"] = int(days)
+        if success_days is not None and str(success_days).strip() != "":
+            kwargs["success_retention_days"] = int(success_days)
+
+        summary = cleanup_sync_logs(**kwargs)
+        stats = get_sync_log_stats()
+        frappe.msgprint(
+            (
+                f"Sync log cleanup complete.\n"
+                f"• Scrubbed payloads from {summary.get('payloads_scrubbed', 0)} Success row(s)\n"
+                f"• Deleted {summary.get('deleted_success_or_skipped', 0)} Success/Skipped "
+                f"(older than {summary.get('success_retention_days')} day(s))\n"
+                f"• Deleted {summary.get('deleted_past_absolute_retention', 0)} log(s) "
+                f"(older than {summary.get('all_retention_days')} day(s))\n"
+                f"• Remaining rows: {stats.get('total') or 0} "
+                f"(Success {stats.get('success_count') or 0}, "
+                f"Failed {stats.get('failed_count') or 0})"
+            ),
+            title="Sync Log Cleanup",
+            indicator="green",
+            as_list=False,
+        )
+        return summary
 
     @frappe.whitelist()
     def test_order_import(self):
