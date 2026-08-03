@@ -7,7 +7,7 @@ with open("requirements.txt") as f:
 
 setup(
     name="connector",
-    version="1.0.5",
+    version="1.0.6",
     description="ERPNext integration connector — Magento, multi-site ERPNext sync, and more",
     author="Bookspot",
     author_email="info@bookspot.co.ke",
