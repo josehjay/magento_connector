@@ -716,6 +716,9 @@ def push_item_to_magento(item_code):
             last_failed_at=None,
         )
 
+        # Do not bump Item.modified — otherwise the item looks "edited since
+        # last sync" and the next batch re-selects the same SKUs forever,
+        # starving the rest of the catalog.
         frappe.db.set_value(
             "Item",
             item_code,
@@ -724,6 +727,7 @@ def push_item_to_magento(item_code):
                 "magento_last_synced_on": frappe.utils.now_datetime(),
                 "magento_sync_error": "",
             },
+            update_modified=False,
         )
         frappe.db.commit()
 
@@ -890,7 +894,9 @@ def _handle_push_failure(item_code, exc, payload=None):
         last_failed_at=now,
     )
 
-    frappe.db.set_value("Item", item_code, "magento_sync_error", error_msg[:500])
+    frappe.db.set_value(
+        "Item", item_code, "magento_sync_error", error_msg[:500], update_modified=False
+    )
     frappe.db.commit()
 
     create_log(
@@ -997,19 +1003,65 @@ def is_full_product_sync_running():
     return False
 
 
-def _mark_full_sync_active(chunk_no):
+def _mark_full_sync_active(chunk_no, cursor=None):
+    payload = {
+        "next_chunk": int(chunk_no),
+        "updated_at": str(frappe.utils.now_datetime()),
+    }
+    if cursor is not None:
+        payload["cursor"] = cursor
+    else:
+        existing = frappe.cache().get_value(FULL_SYNC_ACTIVE_KEY) or {}
+        if existing.get("cursor"):
+            payload["cursor"] = existing["cursor"]
     frappe.cache().set_value(
         FULL_SYNC_ACTIVE_KEY,
-        {
-            "next_chunk": int(chunk_no),
-            "updated_at": str(frappe.utils.now_datetime()),
-        },
+        payload,
         expires_in_sec=FULL_SYNC_CHUNK_TIMEOUT * 4,
     )
 
 
 def _clear_full_sync_active():
     frappe.cache().delete_value(FULL_SYNC_ACTIVE_KEY)
+
+
+def _full_sync_cursor():
+    active = frappe.cache().get_value(FULL_SYNC_ACTIVE_KEY) or {}
+    return active.get("cursor") or ""
+
+
+def _rotate_from_cursor(item_codes, cursor):
+    """
+    Start after `cursor` so each chunk advances through the backlog instead of
+    always re-taking the same first N codes (templates / early alphabet).
+    Wraps around when the cursor is at/past the end.
+    """
+    if not item_codes or not cursor:
+        return list(item_codes)
+    try:
+        idx = item_codes.index(cursor)
+    except ValueError:
+        # Cursor dropped out (synced/disabled) — resume at first code after it.
+        for i, code in enumerate(item_codes):
+            if code > cursor:
+                return item_codes[i:] + item_codes[:i]
+        return list(item_codes)
+    nxt = idx + 1
+    if nxt >= len(item_codes):
+        return list(item_codes)
+    return item_codes[nxt:] + item_codes[:nxt]
+
+
+def _as_datetime(value):
+    """Normalize DB/datetime values for reliable modified-vs-synced comparisons."""
+    if not value:
+        return None
+    if hasattr(value, "year"):
+        return value
+    try:
+        return frappe.utils.get_datetime(value)
+    except Exception:
+        return value
 
 
 def _enqueue_full_sync_chunk(chunk_no=0):
@@ -1063,7 +1115,7 @@ def _get_items_needing_full_sync():
         for row in frappe.get_all(
             "Magento Product Map",
             filters={"item_code": ["in", item_codes]},
-            fields=["item_code", "sync_status", "retry_count"],
+            fields=["item_code", "sync_status", "retry_count", "last_synced_on"],
         )
     }
 
@@ -1085,9 +1137,13 @@ def _get_items_needing_full_sync():
             continue
 
         # Already Synced — only re-push if ERPNext data changed since then.
-        if not item.get("magento_last_synced_on") or (
-            item.get("modified") and item["magento_last_synced_on"] < item["modified"]
-        ):
+        # Prefer map.last_synced_on (set by upsert_map) over the Item field so
+        # connector metadata writes cannot keep an item permanently "stale".
+        last_sync = _as_datetime(
+            (map_row or {}).get("last_synced_on") or item.get("magento_last_synced_on")
+        )
+        modified = _as_datetime(item.get("modified"))
+        if not last_sync or (modified and modified > last_sync):
             to_sync.append(item_code)
 
     by_code = {item["item_code"]: item for item in items}
@@ -1098,14 +1154,12 @@ def _get_items_needing_full_sync():
 def run_full_product_sync_chunk(chunk_no=0):
     """
     Process one chunk of items needing sync, then enqueue the next chunk if
-    more remain. Re-queries the "needs sync" list before AND after processing
-    so progress is always persisted — this naturally accounts for items that
-    succeeded (now "Synced", excluded next time), items that failed (retried
-    next chunk, up to FULL_SYNC_MAX_RETRIES), and items deferred by the soft
-    deadline (still pending, retried next chunk).
+    more remain. Uses a rotating cursor so each chunk advances through the
+    backlog instead of re-processing the same first N items every time.
 
-    Each chunk uses a unique job_id so the follow-up enqueue is never dropped
-    by deduplicate while this job is still marked running.
+    Re-queries the "needs sync" list after processing so items that succeeded
+    (now "Synced") drop out, Failed items stay eligible (up to the retry cap),
+    and soft-deadline leftovers are picked up later in the rotation.
     """
     if not _is_sync_enabled():
         _clear_full_sync_active()
@@ -1120,11 +1174,13 @@ def run_full_product_sync_chunk(chunk_no=0):
         _clear_full_sync_active()
         return
 
-    chunk = to_sync[:FULL_SYNC_CHUNK_SIZE]
+    ordered = _rotate_from_cursor(to_sync, _full_sync_cursor())
+    chunk = ordered[:FULL_SYNC_CHUNK_SIZE]
     time_budget = FULL_SYNC_CHUNK_TIMEOUT - FULL_SYNC_SOFT_DEADLINE_MARGIN
 
     frappe.logger("connector").info(
         f"run_full_product_sync_chunk: chunk={chunk_no} processing up to {len(chunk)} item(s) "
+        f"starting after cursor={_full_sync_cursor()!r} "
         f"({len(to_sync) - len(chunk)} more after this chunk)."
     )
     try:
@@ -1133,12 +1189,17 @@ def run_full_product_sync_chunk(chunk_no=0):
         # Never let one bad chunk silently stop the rest of the backlog.
         frappe.log_error(frappe.get_traceback(), "Connector Full Product Sync Chunk")
 
+    # Advance cursor to the last item we attempted so the next chunk moves on.
+    if chunk:
+        _mark_full_sync_active(chunk_no, cursor=chunk[-1])
+
     remaining = len(_get_items_needing_full_sync())
     if remaining > 0:
         next_chunk = chunk_no + 1
         _enqueue_full_sync_chunk(next_chunk)
         frappe.logger("connector").info(
-            f"run_full_product_sync_chunk: enqueued chunk {next_chunk} ({remaining} item(s) left)."
+            f"run_full_product_sync_chunk: enqueued chunk {next_chunk} "
+            f"({remaining} item(s) left, cursor={chunk[-1] if chunk else ''!r})."
         )
     else:
         _clear_full_sync_active()
@@ -1166,6 +1227,9 @@ def full_product_sync():
         _clear_full_sync_active()
         return
 
+    # Fresh kickoff — clear any stale cursor so we start from the top once,
+    # then rotation advances through the full backlog across chunks.
+    _clear_full_sync_active()
     _enqueue_full_sync_chunk(0)
     frappe.logger("connector").info(
         f"full_product_sync: enqueued chunk 0 ({len(to_sync)} item(s) total need syncing)."

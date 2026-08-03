@@ -233,6 +233,7 @@ def rebuild_map_for_item(
                 "magento_last_synced_on": frappe.utils.now_datetime(),
                 "magento_sync_error": "",
             },
+            update_modified=False,
         )
 
         create_log(

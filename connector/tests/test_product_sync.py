@@ -381,6 +381,8 @@ class TestGetItemsNeedingFullSync(unittest.TestCase):
 
     @staticmethod
     def _wire_get_all(mock_frappe, items, map_rows):
+        mock_frappe.utils.get_datetime.side_effect = lambda v: v
+
         def side_effect(doctype, **kwargs):
             if doctype == "Item":
                 return items
@@ -397,7 +399,10 @@ class TestGetItemsNeedingFullSync(unittest.TestCase):
             "magento_last_synced_on": "2026-01-02 00:00:00",
             "has_variants": 0, "variant_of": None,
         }]
-        map_rows = [{"item_code": "A", "sync_status": "Synced", "retry_count": 0}]
+        map_rows = [{
+            "item_code": "A", "sync_status": "Synced", "retry_count": 0,
+            "last_synced_on": "2026-01-02 00:00:00",
+        }]
         self._wire_get_all(mock_frappe, items, map_rows)
 
         from connector.sync.product_sync import _get_items_needing_full_sync
@@ -411,11 +416,33 @@ class TestGetItemsNeedingFullSync(unittest.TestCase):
             "magento_last_synced_on": "2026-01-02 00:00:00",
             "has_variants": 0, "variant_of": None,
         }]
-        map_rows = [{"item_code": "A", "sync_status": "Synced", "retry_count": 0}]
+        map_rows = [{
+            "item_code": "A", "sync_status": "Synced", "retry_count": 0,
+            "last_synced_on": "2026-01-02 00:00:00",
+        }]
         self._wire_get_all(mock_frappe, items, map_rows)
 
         from connector.sync.product_sync import _get_items_needing_full_sync
         self.assertEqual(_get_items_needing_full_sync(), ["A"])
+
+    @patch("connector.sync.product_sync.frappe")
+    def test_skips_when_map_last_synced_is_newer_than_modified(self, mock_frappe):
+        """Connector metadata must not keep an item permanently stale."""
+        mock_frappe.get_single.return_value = MagicMock(magento_item_groups=[])
+        items = [{
+            "item_code": "A", "modified": "2026-01-01 00:00:00",
+            # Stale/buggy Item field after a sync that bumped modified.
+            "magento_last_synced_on": "2026-01-01 00:00:00",
+            "has_variants": 0, "variant_of": None,
+        }]
+        map_rows = [{
+            "item_code": "A", "sync_status": "Synced", "retry_count": 0,
+            "last_synced_on": "2026-01-02 00:00:00",
+        }]
+        self._wire_get_all(mock_frappe, items, map_rows)
+
+        from connector.sync.product_sync import _get_items_needing_full_sync
+        self.assertEqual(_get_items_needing_full_sync(), [])
 
     @patch("connector.sync.product_sync.frappe")
     def test_includes_never_synced_item(self, mock_frappe):
@@ -618,8 +645,9 @@ class TestFullProductSyncChunkChaining(unittest.TestCase):
         self, mock_frappe, mock_needs, mock_batch
     ):
         mock_frappe.db.get_single_value.return_value = True
-        mock_frappe.cache.return_value.set_value = MagicMock()
-        mock_frappe.cache.return_value.delete_value = MagicMock()
+        cache = MagicMock()
+        cache.get_value.return_value = {}
+        mock_frappe.cache.return_value = cache
         # First call (before process): 25 items; second call (after): 5 remain.
         mock_needs.side_effect = [
             [f"I{i}" for i in range(25)],
@@ -641,6 +669,48 @@ class TestFullProductSyncChunkChaining(unittest.TestCase):
         self.assertEqual(kwargs.get("job_id"), _full_sync_chunk_job_id(1))
         self.assertEqual(kwargs.get("chunk_no"), 1)
         self.assertTrue(kwargs.get("deduplicate"))
+        # Cursor advanced to last item of this chunk.
+        set_calls = cache.set_value.call_args_list
+        self.assertTrue(any(
+            (c.args[1] or {}).get("cursor") == f"I{BATCH_SIZE - 1}"
+            for c in set_calls
+        ))
+
+    @patch("connector.sync.product_sync._run_batch_product_sync")
+    @patch("connector.sync.product_sync._get_items_needing_full_sync")
+    @patch("connector.sync.product_sync.frappe")
+    def test_rotates_past_cursor_instead_of_repeating_first_batch(
+        self, mock_frappe, mock_needs, mock_batch
+    ):
+        mock_frappe.db.get_single_value.return_value = True
+        cache = MagicMock()
+        cache.get_value.return_value = {"cursor": "I4", "next_chunk": 1}
+        mock_frappe.cache.return_value = cache
+        codes = [f"I{i}" for i in range(10)]
+        mock_needs.side_effect = [codes, codes]  # still all need sync
+
+        from connector.sync.product_sync import run_full_product_sync_chunk
+        run_full_product_sync_chunk(chunk_no=1)
+
+        attempted = mock_batch.call_args.args[0]
+        # After cursor I4, next should start at I5 (not I0 again).
+        self.assertEqual(attempted[0], "I5")
+
+
+class TestRotateFromCursor(unittest.TestCase):
+    def test_rotates_after_cursor(self):
+        from connector.sync.product_sync import _rotate_from_cursor
+        self.assertEqual(
+            _rotate_from_cursor(["A", "B", "C", "D"], "B"),
+            ["C", "D", "A", "B"],
+        )
+
+    def test_wraps_when_cursor_is_last(self):
+        from connector.sync.product_sync import _rotate_from_cursor
+        self.assertEqual(
+            _rotate_from_cursor(["A", "B", "C"], "C"),
+            ["A", "B", "C"],
+        )
 
 
 if __name__ == "__main__":
