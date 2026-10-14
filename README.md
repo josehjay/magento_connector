@@ -110,6 +110,30 @@ That sets `core.hooksPath=.githooks` and `alias.push` so a single `git push` bum
 
 Skip a bump when needed: `SKIP_VERSION_BUMP=1 git push`.
 
+### Frappe `pypika` / `gunicorn` pins
+
+`bench update` installs this app with `uv`, which requires the same git-URL pins Frappe uses. Those pins are kept in `pyproject.toml` and `requirements.txt`.
+
+**On the ERPNext bench** (after Frappe has been pulled, or when `bench update` failed with conflicting `pypika` URLs):
+
+```bash
+cd /home/frappe/frappe-bench/apps/connector
+python scripts/prep_bench_update.py
+cd /home/frappe/frappe-bench
+bench setup requirements
+# or: bench update
+```
+
+That reads `apps/frappe/pyproject.toml`, rewrites the pins, commits, and pushes to GitHub (version bump included). The bench user needs `git push` access to origin.
+
+To run the same job daily from ERPNext, add this to `sites/common_site_config.json` (or the site config):
+
+```json
+"sync_frappe_pins_to_github": 1
+```
+
+GitHub Actions also syncs pins daily from Frappe `version-16` and commits them to this repo.
+
 ### 3. Magento side setup (one-time, only if using Magento integration)
 1. In Magento Admin → **System → Extensions → Integrations**
 2. Click **Add New Integration**

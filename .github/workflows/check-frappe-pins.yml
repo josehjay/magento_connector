@@ -13,9 +13,9 @@ on:
       - "requirements.txt"
       - "scripts/check_frappe_pins.py"
   schedule:
-    # Weekly, so drift is caught even if this app's files never change but
-    # Frappe bumps its own gunicorn/pypika pin in the meantime.
-    - cron: "0 6 * * 1"
+    # Daily, so Frappe gunicorn/pypika pin bumps are committed before
+    # `bench update` hits a conflicting-URL install failure.
+    - cron: "0 6 * * *"
   workflow_dispatch:
     inputs:
       frappe_ref:
@@ -39,16 +39,11 @@ jobs:
           python scripts/check_frappe_pins.py \
             --frappe-ref "${{ github.event.inputs.frappe_ref || env.DEFAULT_FRAPPE_REF }}"
 
-  auto-fix-pr:
-    # Only runs on the schedule/manual trigger, never on push/PR, so it can't
-    # interfere with an in-flight PR. Opens (or updates) a PR with the
-    # corrected pins whenever Frappe has drifted, so a human just needs to
-    # review and merge instead of debugging a `bench update` failure.
+  auto-sync:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -59,14 +54,8 @@ jobs:
           python scripts/check_frappe_pins.py \
             --frappe-ref "${{ github.event.inputs.frappe_ref || env.DEFAULT_FRAPPE_REF }}" \
             --fix
-      - name: Open PR with any pin fixes
-        uses: peter-evans/create-pull-request@v6
+      - name: Commit pin updates to the default branch
+        uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit-message: "chore: sync Frappe gunicorn/pypika pins"
-          title: "chore: sync Frappe gunicorn/pypika pins"
-          body: |
-            Frappe bumped a git-URL pin (`gunicorn` and/or `pypika`). This PR
-            was generated automatically by `scripts/check_frappe_pins.py --fix`
-            to keep this app installable via `bench get-app` / `bench update`.
-          branch: chore/sync-frappe-pins
-          delete-branch: true
+          commit_message: "chore: sync Frappe gunicorn/pypika pins"
+          file_pattern: pyproject.toml requirements.txt

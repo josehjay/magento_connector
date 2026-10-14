@@ -112,6 +112,10 @@ scheduler_events = {
         "30 2 * * *": [
             "connector.tasks.cleanup_sync_logs",
         ],
+        # Mirror Frappe gunicorn/pypika pins and push to GitHub (opt-in)
+        "15 4 * * *": [
+            "connector.tasks.sync_frappe_pins_to_github",
+        ],
     }
 }
 
