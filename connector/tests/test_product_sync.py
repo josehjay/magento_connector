@@ -120,7 +120,7 @@ class TestProductSync(unittest.TestCase):
     @patch("connector.sync.product_sync.create_log")
     @patch("connector.sync.product_sync._get_item_price")
     @patch("connector.sync.product_sync._pull_magento_data_for_item")
-    def test_push_preserves_magento_only_data(
+    def test_update_sends_only_erpnext_owned_fields(
         self,
         mock_pull,
         mock_price,
@@ -130,10 +130,10 @@ class TestProductSync(unittest.TestCase):
         mock_frappe,
     ):
         """
-        Pushing to an existing Magento product must not wipe category links,
-        media gallery entries, or custom attributes ERPNext doesn't manage —
-        Magento is never overwritten with data ERPNext doesn't know about.
-        ERPNext's name/price must still win over whatever Magento currently has.
+        Updating an existing Magento product sends only ERPNext-owned fields.
+        Attribute set (e.g. "Books"), visibility, descriptions, categories,
+        images, stock and Magento-filled attributes are omitted so Magento
+        keeps them. ERPNext's name/price still win.
         """
         mock_frappe.db.get_single_value.return_value = True
         mock_frappe.get_doc.return_value = _mock_item()
@@ -171,22 +171,35 @@ class TestProductSync(unittest.TestCase):
         # ERPNext wins for the fields it owns.
         self.assertEqual(sent_payload["name"], MOCK_ITEM["item_name"])
         self.assertEqual(sent_payload["price"], 49.99)
+        self.assertEqual(sent_payload["sku"], "TEST-SKU-001")
+        self.assertEqual(sent_payload["weight"], 1.5)
 
-        # Magento-only data ERPNext never touches is carried through untouched.
-        self.assertEqual(
-            sent_payload["media_gallery_entries"],
-            [{"id": 1, "file": "/a/b/existing.jpg"}],
-        )
-        self.assertEqual(
-            sent_payload["extension_attributes"]["category_links"],
-            [{"category_id": "42"}],
-        )
-        custom_by_code = {a["attribute_code"]: a["value"] for a in sent_payload["custom_attributes"]}
-        self.assertEqual(custom_by_code["some_magento_only_attr"], "keep me")
-        # ERPNext-managed custom attribute is overwritten with the fresh value.
-        self.assertEqual(custom_by_code["description"], MOCK_ITEM["description"])
-        # ERPNext-managed extension attribute (stock placeholder) is present too.
-        self.assertIn("stock_item", sent_payload["extension_attributes"])
+        # Everything Magento owns is left out, so the PUT cannot reset it.
+        for magento_owned in (
+            "attribute_set_id",
+            "visibility",
+            "extension_attributes",
+            "custom_attributes",
+            "media_gallery_entries",
+        ):
+            self.assertNotIn(magento_owned, sent_payload)
+
+    @patch("connector.sync.product_sync._get_variant_attributes")
+    @patch("connector.sync.product_sync._get_item_price")
+    @patch("connector.sync.product_sync.frappe")
+    def test_update_payload_keeps_variant_option_attributes(
+        self, mock_frappe, mock_price, mock_variant_attrs
+    ):
+        """Variants still send their configurable option attributes on update."""
+        mock_frappe.get_single.return_value = MagicMock(price_list="Standard Selling", magento_item_groups=[])
+        mock_price.return_value = 10.0
+        mock_variant_attrs.return_value = [{"attribute_code": "size", "value": "A4"}]
+
+        from connector.sync.product_sync import _build_update_payload
+        payload = _build_update_payload(_mock_item(variant_of="TEMPLATE-1"))
+
+        self.assertEqual(payload["custom_attributes"], [{"attribute_code": "size", "value": "A4"}])
+        self.assertNotIn("attribute_set_id", payload)
 
     @patch("connector.sync.product_sync.frappe")
     def test_skips_when_sync_disabled(self, mock_frappe):

@@ -211,10 +211,12 @@ def _resolve_magento_attribute_code(item_attribute):
 
 def _build_product_payload(doc):
     """
-    Convert an ERPNext Item doc into a Magento product payload dict.
+    Convert an ERPNext Item doc into the payload for CREATING a Magento product.
+    Existing products are updated with _build_update_payload() instead, which
+    sends only ERPNext-owned fields.
     - Template (has_variants): type_id configurable.
     - Variant (variant_of): type_id simple, with variant attributes in custom_attributes.
-    Attribute set from Magento Settings → Item Group. Stock via inventory_sync.
+    Attribute set from Magento Settings → Item Group (on create only). Stock via inventory_sync.
 
     ERPNext is the sole source of truth for name/price: this payload always
     carries ERPNext's current item_name/price and is pushed on every sync, so
@@ -268,49 +270,41 @@ def _build_product_payload(doc):
     return payload
 
 
-def _merge_preserving_magento_only_data(existing_product, payload):
+# Top-level fields ERPNext owns on an existing Magento product. Everything
+# else (attribute set, visibility, descriptions, categories, images, stock,
+# and any attributes filled in Magento) is set once on create and then left
+# to Magento.
+ERPNEXT_OWNED_UPDATE_FIELDS = ("sku", "name", "price", "status", "type_id", "weight")
+
+
+def _build_update_payload(doc, create_payload=None):
     """
-    Overlay our ERPNext-driven payload onto the product Magento already has,
-    so fields Magento manages and ERPNext knows nothing about — category
-    assignments, images/media gallery, and any custom attributes we don't
-    explicitly set — are carried through untouched rather than wiped by a
-    partial PUT.
+    Payload for updating a product that already exists in Magento: only the
+    fields ERPNext owns (ERPNEXT_OWNED_UPDATE_FIELDS, plus variant option
+    attributes so the configurable link keeps working).
 
-    This matters because Magento's product REST API does not merge
-    `extension_attributes`: a PUT that includes `extension_attributes` (e.g.
-    just `stock_item`) can silently clear `category_links` and other
-    extension data that isn't repeated in the request. `custom_attributes`
-    is safer (Magento merges by attribute_code) but we still merge explicitly
-    here rather than rely on that behavior.
-
-    ERPNext-owned fields (name, price, status, visibility, type_id,
-    attribute_set_id, weight, and the custom_attributes/extension_attributes
-    keys we manage) always win. Everything else Magento already has for this
-    product is preserved as-is.
+    Magento's PUT /V1/products/{sku} loads the existing product and applies
+    only the fields sent, so anything omitted keeps its current value. That
+    is why this payload must NOT carry:
+      - attribute_set_id: re-sending the Item Group mapping (or its default,
+        4) moved products out of e.g. the "Books" set and dropped the
+        attributes filled in there;
+      - extension_attributes: stock_item {qty 0, out of stock} reset stock on
+        every push (stock belongs to inventory_sync), and a partial
+        extension_attributes can clear category links;
+      - description/short_description/visibility: often edited in Magento;
+      - an echo of every existing custom attribute: this PUT runs in the
+        default store view, so echoing would pin every value as a store-view
+        override that hides later "All Store Views" edits.
     """
-    if not existing_product:
-        return payload
+    payload = create_payload or _build_product_payload(doc)
+    update = {k: payload[k] for k in ERPNEXT_OWNED_UPDATE_FIELDS if k in payload}
 
-    merged = dict(existing_product)
-    merged.update({
-        k: v for k, v in payload.items()
-        if k not in ("custom_attributes", "extension_attributes")
-    })
+    variant_attributes = _get_variant_attributes(doc.item_code) if doc.get("variant_of") else []
+    if variant_attributes:
+        update["custom_attributes"] = variant_attributes
 
-    existing_custom = {
-        attr.get("attribute_code"): attr
-        for attr in (existing_product.get("custom_attributes") or [])
-        if attr.get("attribute_code")
-    }
-    for attr in payload.get("custom_attributes") or []:
-        existing_custom[attr["attribute_code"]] = attr
-    merged["custom_attributes"] = list(existing_custom.values())
-
-    existing_extension_attributes = dict(existing_product.get("extension_attributes") or {})
-    existing_extension_attributes.update(payload.get("extension_attributes") or {})
-    merged["extension_attributes"] = existing_extension_attributes
-
-    return merged
+    return update
 
 
 # ---------------------------------------------------------------------------
@@ -726,7 +720,8 @@ def push_item_to_magento(item_code):
             existing_product = None
 
         if existing_product:
-            payload = _merge_preserving_magento_only_data(existing_product, payload)
+            # Only ERPNext-owned fields; Magento keeps everything else.
+            payload = _build_update_payload(doc, payload)
             result = client.update_product(item_code, payload)
         else:
             result = client.create_product(payload)
