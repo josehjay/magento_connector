@@ -255,19 +255,20 @@ class TestProductSync(unittest.TestCase):
             "connector.sync.product_sync.disable_in_magento",
         )
 
+    @patch("connector.sync.product_sync.delete_map")
     @patch("connector.sync.product_sync.create_log")
     @patch("connector.sync.product_sync.get_magento_product_id")
     @patch("connector.sync.product_sync.MagentoClient")
     @patch("connector.sync.product_sync.frappe")
-    def test_disable_in_magento_sets_status_two(
-        self, mock_frappe, mock_client_cls, mock_get_id, mock_log
+    def test_disable_in_magento_deletes_product_and_map(
+        self, mock_frappe, mock_client_cls, mock_get_id, mock_log, mock_delete_map
     ):
-        """disable_in_magento must set Magento status=2 and keep the map."""
+        """Disabling an Item removes its Magento product and map immediately."""
         mock_frappe.db.get_single_value.return_value = True
         mock_frappe.db.exists.return_value = True
         mock_frappe.db.get_value.side_effect = [
             1,  # Item.disabled check
-            {"magento_product_id": 101, "magento_sku": "TEST-SKU-001"},
+            {"magento_product_id": 101, "magento_sku": "ALT-SKU"},
         ]
         mock_get_id.return_value = 101
         mock_client = MagicMock()
@@ -276,13 +277,56 @@ class TestProductSync(unittest.TestCase):
         from connector.sync.product_sync import disable_in_magento
         disable_in_magento("TEST-SKU-001")
 
-        mock_client.update_product.assert_called_once_with(
-            "TEST-SKU-001", {"status": 2}
-        )
-        mock_frappe.delete_doc = getattr(mock_frappe, "delete_doc", MagicMock())
-        # Map must not be deleted in phase 1.
-        mock_log.assert_called()
-        self.assertEqual(mock_log.call_args.kwargs.get("operation"), "Disable in Magento")
+        mock_client.delete_product.assert_called_once_with("ALT-SKU")
+        mock_client.update_product.assert_not_called()
+        mock_delete_map.assert_called_once_with("TEST-SKU-001")
+        mock_frappe.db.set_value.assert_called_once()
+        self.assertEqual(mock_log.call_args.kwargs.get("operation"), "Remove from Magento")
+        self.assertEqual(mock_log.call_args.kwargs.get("status"), "Success")
+
+    @patch("connector.sync.product_sync.delete_map")
+    @patch("connector.sync.product_sync.create_log")
+    @patch("connector.sync.product_sync.get_magento_product_id")
+    @patch("connector.sync.product_sync.MagentoClient")
+    @patch("connector.sync.product_sync.frappe")
+    def test_disable_in_magento_keeps_map_when_delete_fails(
+        self, mock_frappe, mock_client_cls, mock_get_id, mock_log, mock_delete_map
+    ):
+        """A failed delete keeps the map (cleanup retries) and hides the product."""
+        mock_frappe.db.get_single_value.return_value = True
+        mock_frappe.db.exists.return_value = True
+        mock_frappe.db.get_value.side_effect = [
+            1,
+            {"magento_product_id": 101, "magento_sku": "TEST-SKU-001"},
+        ]
+        mock_get_id.return_value = 101
+        mock_client = MagicMock()
+        mock_client.delete_product.side_effect = MagentoAPIError("boom", status_code=500)
+        mock_client_cls.return_value = mock_client
+
+        from connector.sync.product_sync import disable_in_magento
+        disable_in_magento("TEST-SKU-001")
+
+        mock_client.update_product.assert_called_once_with("TEST-SKU-001", {"status": 2})
+        mock_delete_map.assert_not_called()
+        self.assertEqual(mock_log.call_args.kwargs.get("status"), "Failed")
+
+    @patch("connector.sync.product_sync.delete_map")
+    @patch("connector.sync.product_sync.MagentoClient")
+    @patch("connector.sync.product_sync.frappe")
+    def test_disable_in_magento_skips_reenabled_item(
+        self, mock_frappe, mock_client_cls, mock_delete_map
+    ):
+        """A job queued before the Item was re-enabled must not delete anything."""
+        mock_frappe.db.get_single_value.return_value = True
+        mock_frappe.db.exists.return_value = True
+        mock_frappe.db.get_value.return_value = 0  # Item.disabled
+
+        from connector.sync.product_sync import disable_in_magento
+        disable_in_magento("TEST-SKU-001")
+
+        mock_client_cls.assert_not_called()
+        mock_delete_map.assert_not_called()
 
     @patch("connector.sync.product_sync.frappe")
     def test_on_item_trash_enqueues_magento_removal(self, mock_frappe):
