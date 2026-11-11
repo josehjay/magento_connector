@@ -38,14 +38,21 @@ MAGENTO_STATUS_NOTES = {
 }
 
 
-def _is_sync_enabled():
+def _sync_disabled_reason():
+    """Return None when order sync is enabled, otherwise which switch is off."""
     try:
         enabled = frappe.db.get_single_value("Connector Settings", "enable_magento_integration")
         if enabled is not None and not bool(enabled):
-            return False
+            return "Connector Settings → Enable Magento Integration is off"
     except Exception:
         pass
-    return bool(frappe.db.get_single_value("Magento Settings", "sync_enabled"))
+    if not frappe.db.get_single_value("Magento Settings", "sync_enabled"):
+        return "Magento Settings → Sync Enabled is off"
+    return None
+
+
+def _is_sync_enabled():
+    return _sync_disabled_reason() is None
 
 
 @frappe.whitelist()
@@ -72,13 +79,22 @@ def receive_order(order_payload):
     logger = frappe.logger("connector")
     verify_incoming_signed_request("receive_order")
 
-    if not _is_sync_enabled():
-        logger.info("receive_order: skipped — sync is disabled.")
-        return {"ok": False, "reason": "sync_disabled"}
+    disabled_reason = _sync_disabled_reason()
+    if disabled_reason:
+        logger.warning(f"receive_order: rejected — {disabled_reason}.")
+        create_log(
+            operation="Order Pull",
+            status="Failed",
+            error_message=f"Order push from Magento rejected: {disabled_reason}",
+        )
+        return {"ok": False, "status": "failed", "reason": f"sync_disabled: {disabled_reason}"}
 
-    order = json.loads(order_payload) if isinstance(order_payload, str) else order_payload
+    try:
+        order = json.loads(order_payload) if isinstance(order_payload, str) else order_payload
+    except (TypeError, ValueError) as exc:
+        return {"ok": False, "status": "failed", "reason": f"invalid_payload: {exc}"}
     if not isinstance(order, dict):
-        return {"ok": False, "reason": "invalid_payload"}
+        return {"ok": False, "status": "failed", "reason": "invalid_payload: expected a JSON object"}
 
     increment_id = order.get("increment_id", "?")
     logger.info(f"receive_order: processing pushed order #{increment_id}")
@@ -97,8 +113,16 @@ def receive_order(order_payload):
         )
         return {"ok": True, "status": status, "sales_order": so_name, "customer": customer}
     except Exception as exc:
+        frappe.db.rollback()
         frappe.log_error(frappe.get_traceback(), f"receive_order: failed for order #{increment_id}")
-        return {"ok": False, "reason": str(exc)}
+        create_log(
+            operation="Order Pull",
+            status="Failed",
+            magento_id=str(increment_id),
+            error_message=f"Order #{increment_id}: {exc}",
+        )
+        frappe.db.commit()
+        return {"ok": False, "status": "failed", "reason": str(exc)}
 
 
 @frappe.whitelist()
@@ -176,6 +200,7 @@ def sync_orders():
     updated = 0
     skipped = 0
     failed = 0
+    failed_orders = []
 
     for order in orders:
         increment_id = order.get("increment_id", "?")
@@ -190,6 +215,8 @@ def sync_orders():
                 skipped += 1
         except Exception as e:
             failed += 1
+            failed_orders.append(order)
+            frappe.db.rollback()
             tb = frappe.get_traceback()
             frappe.log_error(tb, f"Magento Order Sync Error: order #{increment_id}")
             create_log(
@@ -200,15 +227,16 @@ def sync_orders():
                 response_payload={"traceback_logged": True},
             )
 
-    # Advance cursor only when at least one order was successfully imported/updated,
-    # or when all were legitimately skipped (cancelled, already imported).
-    # If ALL orders failed, keep the cursor so they are retried next run.
-    # Use Magento's own updated_at timestamps to avoid server-clock / timezone drift.
-    if not failed or imported or updated:
-        frappe.db.set_single_value(
-            "Magento Settings", "last_order_sync_time",
-            _cursor_from_orders(orders)
-        )
+    # Advance the cursor using Magento's own updated_at timestamps (avoids
+    # server-clock / timezone drift). Never move it past a failed order: if any
+    # failed, stop just before the earliest failure so the next run re-fetches
+    # it. Orders already imported are deduplicated by Magento Order Map.
+    if not failed:
+        new_cursor = _cursor_from_orders(orders)
+    else:
+        new_cursor = _cursor_before_orders(failed_orders)
+    if new_cursor:
+        frappe.db.set_single_value("Magento Settings", "last_order_sync_time", new_cursor)
         frappe.db.commit()
 
     summary = {
@@ -284,16 +312,26 @@ def _process_order(order, client):
     # ----- Customer -----
     # Always create/find the real buyer's customer record — we need it for the
     # shipping address even when a default billing customer is configured.
-    try:
-        real_customer_name = get_or_create_customer(order)
-    except Exception as e:
-        frappe.log_error(frappe.get_traceback(), f"Order #{magento_increment_id}: customer creation failed")
-        raise RuntimeError(f"Customer creation failed: {e}") from e
-
     # If a default "Web Sales"-style customer is configured, bill to that
     # customer; otherwise bill to the real buyer directly.
     settings_snap = frappe.get_single("Magento Settings")
     default_customer = (settings_snap.get("default_customer") or "").strip()
+
+    try:
+        real_customer_name = get_or_create_customer(order)
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), f"Order #{magento_increment_id}: customer creation failed")
+        if not default_customer:
+            raise RuntimeError(f"Customer creation failed: {e}") from e
+        # The buyer record is optional when billing to the default customer:
+        # buyer name/email/phone still go into the Sales Order remarks, and the
+        # addresses are linked to the default customer instead.
+        logger.warning(
+            f"Order #{magento_increment_id}: buyer customer could not be created ({e}); "
+            f"continuing with default customer '{default_customer}'."
+        )
+        real_customer_name = default_customer
+
     so_customer = default_customer if default_customer else real_customer_name
 
     # ----- Address -----
@@ -440,6 +478,11 @@ def _process_order(order, client):
         except Exception:
             pass
 
+    # ERPNext rejects stock items without a source warehouse ("Source warehouse
+    # required for stock item"). set_missing_values only fills it from Item
+    # Defaults, so fall back to the Stock Settings / company default warehouse.
+    _apply_default_warehouse(so)
+
     try:
         so.run_method("calculate_taxes_and_totals")
     except Exception as e:
@@ -478,6 +521,35 @@ def _get_default_company():
     return company
 
 
+def _get_default_warehouse(company):
+    """Stock Settings default warehouse (if it belongs to the company), else the
+    company's first enabled leaf warehouse."""
+    default = frappe.db.get_single_value("Stock Settings", "default_warehouse")
+    if default and frappe.db.get_value("Warehouse", default, "company") == company:
+        return default
+    return frappe.db.get_value(
+        "Warehouse",
+        {"company": company, "is_group": 0, "disabled": 0},
+        "name",
+        order_by="creation asc",
+    )
+
+
+def _apply_default_warehouse(so):
+    missing = [
+        row for row in so.get("items") or []
+        if not row.get("warehouse")
+        and frappe.db.get_value("Item", row.item_code, "is_stock_item")
+    ]
+    if not missing:
+        return
+    warehouse = _get_default_warehouse(so.company)
+    if not warehouse:
+        return  # ERPNext validation will report the missing warehouse
+    for row in missing:
+        row.warehouse = warehouse
+
+
 def _safe_now():
     """Return current time as a clean YYYY-MM-DD HH:MM:SS string (no microseconds)."""
     return str(frappe.utils.now_datetime()).split(".")[0]
@@ -509,6 +581,22 @@ def _cursor_from_orders(orders):
         except ValueError:
             pass
     return _safe_now()
+
+
+def _cursor_before_orders(orders):
+    """Cursor one second before the earliest updated_at among `orders` (the pull
+    filter is `updated_at > cursor`, so those orders are fetched again).
+    Returns None when no timestamp is available — the cursor is then left as is."""
+    from datetime import datetime, timedelta
+    stamps = [(o.get("updated_at") or "").strip()[:19] for o in orders]
+    stamps = [s for s in stamps if s]
+    if not stamps:
+        return None
+    try:
+        dt = datetime.strptime(min(stamps), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return (dt - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _get_valid_currency(currency_code):

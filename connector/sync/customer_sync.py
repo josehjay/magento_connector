@@ -9,31 +9,42 @@ import frappe
 from frappe.utils import cstr
 
 
-def _get_customer_group():
-    """Return the default customer group, falling back gracefully."""
-    # 1. Use Selling Settings default
-    group = frappe.db.get_single_value("Selling Settings", "customer_group")
-    if group and frappe.db.exists("Customer Group", group):
-        return group
-    # 2. Try common names
-    for name in ("All Customer Groups", "All", "Commercial", "Individual"):
-        if frappe.db.exists("Customer Group", name):
+def _get_leaf_node(doctype, settings_field, preferred_names):
+    """
+    Return a non-group (leaf) record of a tree doctype such as Customer Group
+    or Territory. ERPNext rejects group nodes on Customer ("Cannot select a
+    Group type Customer Group"), so root nodes like "All Customer Groups" are
+    never returned. Order: Selling Settings default → preferred names → first
+    leaf. Returns None when the tree has no leaf nodes.
+    """
+    def _is_leaf(name):
+        return bool(name) and frappe.db.get_value(doctype, name, "is_group") == 0
+
+    default = frappe.db.get_single_value("Selling Settings", settings_field)
+    if _is_leaf(default):
+        return default
+    for name in preferred_names:
+        if _is_leaf(name):
             return name
-    # 3. Use the first available group
-    first = frappe.db.get_value("Customer Group", {}, "name")
-    return first or "All Customer Groups"
+    return frappe.db.get_value(doctype, {"is_group": 0}, "name", order_by="lft asc")
+
+
+def _get_customer_group():
+    """Return a non-group customer group for new Magento customers."""
+    group = _get_leaf_node(
+        "Customer Group", "customer_group", ("Individual", "Commercial", "Retail")
+    )
+    if not group:
+        raise frappe.ValidationError(
+            "No non-group Customer Group exists. Create one (e.g. 'Individual') "
+            "and set it as Default Customer Group in Selling Settings."
+        )
+    return group
 
 
 def _get_territory():
-    """Return the default territory, falling back gracefully."""
-    territory = frappe.db.get_single_value("Selling Settings", "territory")
-    if territory and frappe.db.exists("Territory", territory):
-        return territory
-    for name in ("All Territories", "All", "Rest Of The World"):
-        if frappe.db.exists("Territory", name):
-            return name
-    first = frappe.db.get_value("Territory", {}, "name")
-    return first or "All Territories"
+    """Return a non-group territory for new Magento customers (None if none exist)."""
+    return _get_leaf_node("Territory", "territory", ("Kenya", "Rest Of The World"))
 
 
 def get_or_create_customer(magento_order):
@@ -79,7 +90,9 @@ def get_or_create_customer(magento_order):
     customer.customer_name = customer_name
     customer.customer_type = "Individual"
     customer.customer_group = _get_customer_group()
-    customer.territory = _get_territory()
+    territory = _get_territory()
+    if territory:
+        customer.territory = territory
 
     if email:
         customer.email_id = email
@@ -256,5 +269,11 @@ def _get_country_name(country_code):
     """Convert ISO 2-letter country code to ERPNext country name."""
     if not country_code:
         return "United States"
-    name = frappe.db.get_value("Country", {"code": country_code.lower()}, "name")
-    return name or country_code
+    code = country_code.strip()
+    # Country.code casing differs between installs (lowercase seed data vs.
+    # uppercase ISO codes entered/validated on Frappe v16), so try both.
+    for candidate in (code.lower(), code.upper()):
+        name = frappe.db.get_value("Country", {"code": candidate}, "name")
+        if name:
+            return name
+    return code

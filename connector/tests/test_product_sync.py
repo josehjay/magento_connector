@@ -311,6 +311,41 @@ class TestProductSync(unittest.TestCase):
         )
 
     @patch("connector.sync.product_sync.frappe")
+    def test_on_item_trash_deletes_maps_and_passes_snapshot(self, mock_frappe):
+        """Maps are deleted before Frappe's link check; the job gets the old id/sku."""
+        mock_frappe.db.get_single_value.return_value = True
+        mock_frappe.db.get_value.return_value = {"magento_product_id": 77, "magento_sku": "ALT-SKU"}
+        doc = MagicMock()
+        doc.get.side_effect = lambda key, *a, **k: {
+            "item_code": "TEST-SKU-002",
+            "sync_to_magento": 1,
+        }.get(key)
+
+        from connector.sync.product_sync import on_item_trash
+        on_item_trash(doc, "on_trash")
+
+        mock_frappe.db.delete.assert_any_call("Magento Product Map", {"item_code": "TEST-SKU-002"})
+        mock_frappe.db.delete.assert_any_call("Remote Site Product Map", {"item_code": "TEST-SKU-002"})
+        mock_frappe.db.commit.assert_not_called()
+        kwargs = mock_frappe.enqueue.call_args.kwargs
+        self.assertEqual(kwargs.get("magento_product_id"), 77)
+        self.assertEqual(kwargs.get("magento_sku"), "ALT-SKU")
+
+    @patch("connector.sync.product_sync.frappe")
+    def test_on_item_trash_deletes_maps_when_magento_disabled(self, mock_frappe):
+        """Even with the Magento integration off, the maps must not block deletion."""
+        mock_frappe.db.get_single_value.return_value = False
+        mock_frappe.db.get_value.return_value = None
+        doc = MagicMock()
+        doc.get.side_effect = lambda key, *a, **k: {"item_code": "TEST-SKU-003"}.get(key)
+
+        from connector.sync.product_sync import on_item_trash
+        on_item_trash(doc, "on_trash")
+
+        mock_frappe.db.delete.assert_any_call("Magento Product Map", {"item_code": "TEST-SKU-003"})
+        mock_frappe.enqueue.assert_not_called()
+
+    @patch("connector.sync.product_sync.frappe")
     @patch("connector.sync.product_sync.delete_map")
     @patch("connector.sync.product_sync.get_magento_product_id")
     @patch("connector.sync.product_sync.create_log")

@@ -57,7 +57,7 @@ BATCH_JOB_TIMEOUT = 900
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _enqueue_product_job(method_path, item_code, timeout=120):
+def _enqueue_product_job(method_path, item_code, timeout=120, **job_kwargs):
     """Enqueue a product sync job with consistent defaults."""
     if "remove_from_magento" in method_path:
         job_prefix = "magento_remove_"
@@ -73,6 +73,7 @@ def _enqueue_product_job(method_path, item_code, timeout=120):
         deduplicate=True,
         enqueue_after_commit=True,
         item_code=item_code,
+        **job_kwargs,
     )
 
 
@@ -387,22 +388,47 @@ def on_item_trash(doc, method):
     ERPNext is the source of truth for products — when an Item is deleted,
     enqueue Magento removal (and map cleanup) after the delete commits.
     """
-    if not _is_magento_enabled():
-        return
-
     item_code = (doc.get("item_code") or doc.get("name") or "").strip()
     if not item_code:
         return
 
-    # Pending maps often have magento_product_id=0 — still need cleanup.
-    has_map = bool(frappe.db.exists("Magento Product Map", item_code))
+    # Snapshot the map before deleting it: the removal job runs after commit,
+    # when neither the Item nor the map exists any more.
+    map_row = frappe.db.get_value(
+        "Magento Product Map",
+        item_code,
+        ["magento_product_id", "magento_sku"],
+        as_dict=True,
+    ) or {}
+    has_map = bool(map_row)
+
+    # Delete the connector's map rows now, in the same transaction, so Frappe's
+    # link check (which runs after on_trash) does not block the Item delete
+    # ("Item X is linked with Magento Product Map X"). If the delete fails for
+    # another reason the transaction rolls back and the maps come back too.
+    _delete_item_maps(item_code)
+
+    if not _is_magento_enabled():
+        return
 
     # Only attempt Magento removal when this item was intended for Magento sync
-    # or we still have an existing map entry to clean up.
+    # or had a map entry (pending maps often have magento_product_id=0).
     if not doc.get("sync_to_magento") and not has_map:
         return
 
-    _enqueue_product_sync(item_code, mode="remove")
+    _enqueue_product_job(
+        "connector.sync.product_sync.remove_from_magento",
+        item_code,
+        timeout=60,
+        magento_product_id=map_row.get("magento_product_id") or doc.get("magento_product_id"),
+        magento_sku=map_row.get("magento_sku") or item_code,
+    )
+
+
+def _delete_item_maps(item_code):
+    """Remove every connector map row linked to an Item (no commit — caller's transaction)."""
+    frappe.db.delete("Magento Product Map", {"item_code": item_code})
+    frappe.db.delete("Remote Site Product Map", {"item_code": item_code})
 
 
 @_safe_hook("Item Price.on_item_price_change")
@@ -590,13 +616,14 @@ def _run_batch_disabled_cleanup(item_codes):
     )
 
 
-def remove_from_magento(item_code):
+def remove_from_magento(item_code, magento_product_id=None, magento_sku=None):
     """
     Delete (or disable) the Magento product for an ERPNext Item, then remove
     the map entry and clear Magento fields on the Item when it still exists.
 
     Used when Sync to Magento is unchecked or when the Item is deleted —
-    ERPNext is the single source of truth for the catalog.
+    ERPNext is the single source of truth for the catalog. On Item delete the
+    map is already gone, so on_item_trash passes its id/sku in explicitly.
     """
     map_row = frappe.db.get_value(
         "Magento Product Map",
@@ -604,8 +631,12 @@ def remove_from_magento(item_code):
         ["magento_product_id", "magento_sku"],
         as_dict=True,
     ) or {}
-    magento_id = map_row.get("magento_product_id") or get_magento_product_id(item_code)
-    sku = (map_row.get("magento_sku") or item_code or "").strip() or item_code
+    magento_id = (
+        map_row.get("magento_product_id")
+        or magento_product_id
+        or get_magento_product_id(item_code)
+    )
+    sku = (map_row.get("magento_sku") or magento_sku or item_code or "").strip() or item_code
 
     if magento_id:
         try:
