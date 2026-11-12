@@ -129,6 +129,8 @@ def get_attribute_map_overview():
     Return every ERPNext Item Attribute with its current Magento mapping
     state, for the Attribute Mapping dialog in Magento Settings.
     """
+    if "System Manager" not in frappe.get_roles():
+        frappe.throw("Only System Manager can view attribute mappings.", frappe.PermissionError)
     attributes = frappe.get_all(
         "Item Attribute",
         fields=["name", "numeric_values"],
@@ -172,6 +174,8 @@ def get_magento_attributes_for_mapping():
     List existing Magento product attributes so the user can map an ERPNext
     Item Attribute onto one of them instead of creating a duplicate.
     """
+    if "System Manager" not in frappe.get_roles():
+        frappe.throw("Only System Manager can list Magento attributes.", frappe.PermissionError)
     try:
         client = MagentoClient()
         return {"ok": True, "items": client.get_product_attributes()}

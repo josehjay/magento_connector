@@ -11,6 +11,7 @@ Remote ERPNext Site entries via the Frappe REST API.
 
 import frappe
 from connector.api.erpnext_client import ERPNextClient, ERPNextAPIError
+from connector.security.permissions import require_item_write
 from connector.connector.doctype.remote_site_product_map.remote_site_product_map import (
     get_remote_item_code,
     upsert_map,
@@ -139,8 +140,10 @@ def on_item_save(doc, method):
 def push_item_to_all_sites(item_code):
     """
     Manually push a single item to all enabled remote ERPNext sites.
-    Can be called from the Item form button.
+    Can be called from the Item form button. Requires write access to the Item
+    (the same users whose Item saves already queue this push).
     """
+    require_item_write(item_code)
     if not _is_erpnext_site_sync_enabled():
         frappe.msgprint("ERPNext site sync is disabled in Connector Settings.", indicator="orange")
         return

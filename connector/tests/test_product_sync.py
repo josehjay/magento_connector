@@ -634,7 +634,7 @@ class TestRunBatchProductSyncSoftDeadline(unittest.TestCase):
     caller to retry on the next chunk.
     """
 
-    @patch("connector.sync.product_sync.push_item_to_magento")
+    @patch("connector.sync.product_sync._push_item_to_magento")
     @patch("connector.sync.product_sync.time")
     @patch("connector.sync.product_sync.frappe")
     def test_stops_once_time_budget_is_exhausted(self, mock_frappe, mock_time, mock_push):
@@ -649,7 +649,7 @@ class TestRunBatchProductSyncSoftDeadline(unittest.TestCase):
 
         mock_push.assert_called_once_with("A")
 
-    @patch("connector.sync.product_sync.push_item_to_magento")
+    @patch("connector.sync.product_sync._push_item_to_magento")
     @patch("connector.sync.product_sync.frappe")
     def test_processes_all_items_when_no_budget_given(self, mock_frappe, mock_push):
         from connector.sync.product_sync import _run_batch_product_sync
@@ -657,7 +657,7 @@ class TestRunBatchProductSyncSoftDeadline(unittest.TestCase):
 
         self.assertEqual(mock_push.call_count, 3)
 
-    @patch("connector.sync.product_sync.push_item_to_magento")
+    @patch("connector.sync.product_sync._push_item_to_magento")
     @patch("connector.sync.product_sync.frappe")
     def test_one_item_failure_does_not_stop_the_rest(self, mock_frappe, mock_push):
         mock_push.side_effect = [None, Exception("boom"), None]

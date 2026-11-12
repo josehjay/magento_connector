@@ -10,6 +10,7 @@ the client-side dialog can use to pre-fill a Payment Entry.
 import frappe
 
 from connector.api.magento_client import MagentoAPIError, MagentoClient
+from connector.security.permissions import require_doc_permission
 
 # ---------------------------------------------------------------------------
 # Magento payment method code → ERPNext Mode of Payment name
@@ -61,6 +62,7 @@ def get_magento_payment_details(sales_invoice: str) -> dict:
       sales_order      – linked ERPNext SO name
       customer         – SI customer name
     """
+    require_doc_permission("Sales Invoice", "read", doc=sales_invoice)
     si = frappe.get_doc("Sales Invoice", sales_invoice)
 
     # ── 1. Find a linked Sales Order ───────────────────────────────────────
@@ -71,6 +73,7 @@ def get_magento_payment_details(sales_invoice: str) -> dict:
     if not so_name:
         return {"ok": False, "reason": "No linked Sales Order found on this invoice."}
 
+    require_doc_permission("Sales Order", "read", doc=so_name)
     so = frappe.get_doc("Sales Order", so_name)
     magento_order_id  = so.get("magento_order_id")
     magento_increment = so.get("magento_increment_id")

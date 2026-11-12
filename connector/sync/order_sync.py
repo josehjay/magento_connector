@@ -24,6 +24,7 @@ from connector.connector.doctype.magento_sync_log.magento_sync_log import (
 )
 from connector.sync.customer_sync import get_or_create_customer, get_or_create_address
 from connector.security.request_signing import verify_incoming_signed_request
+from connector.security.permissions import require_admin, require_push_endpoint_access
 
 
 MAGENTO_STATUS_NOTES = {
@@ -59,7 +60,9 @@ def _is_sync_enabled():
 def run_order_sync_now():
     """
     Whitelisted entry point for running order sync directly (not enqueued).
+    System Manager only; scheduler/desk buttons call sync_orders() directly.
     """
+    require_admin("Only System Manager can run order sync.")
     frappe.logger("connector").info("run_order_sync_now: starting direct order sync.")
     result = sync_orders()
     frappe.logger("connector").info(f"run_order_sync_now: done. result={result}")
@@ -77,6 +80,7 @@ def receive_order(order_payload):
     import json
 
     logger = frappe.logger("connector")
+    require_push_endpoint_access("receive_order")
     verify_incoming_signed_request("receive_order")
 
     disabled_reason = _sync_disabled_reason()
@@ -132,6 +136,7 @@ def receive_order_status(entity_id, status):
     an existing order's status changes in Magento.
     """
     logger = frappe.logger("connector")
+    require_push_endpoint_access("receive_order_status")
     verify_incoming_signed_request("receive_order_status")
 
     if not _is_sync_enabled():

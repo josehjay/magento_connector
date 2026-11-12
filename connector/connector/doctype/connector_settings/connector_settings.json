@@ -13,7 +13,8 @@
   "enable_signed_push_verification",
   "enforce_signed_push_verification",
   "signature_tolerance_seconds",
-  "signed_push_secret"
+  "signed_push_secret",
+  "push_endpoint_role"
  ],
  "fields": [
   {
@@ -74,11 +75,18 @@
    "fieldtype": "Password",
    "label": "Shared Signing Secret",
    "description": "Shared HMAC secret used to verify Magento push requests."
+  },
+  {
+   "fieldname": "push_endpoint_role",
+   "fieldtype": "Link",
+   "label": "Role allowed to call push endpoints",
+   "options": "Role",
+   "description": "Role that the ERPNext user behind Magento's API key must have to call the inbound push endpoints (receive_order, receive_order_status, receive_image_update). Give this role to the Magento integration user first, then set it here. System Manager and Administrator are always allowed. When empty, any logged-in user can call these endpoints and a warning is shown in Signature Verification Status."
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2024-01-01 00:00:00.000000",
+ "modified": "2026-11-12 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Connector",
  "name": "Connector Settings",

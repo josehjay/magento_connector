@@ -14,6 +14,7 @@ from connector.connector.doctype.magento_sync_log.magento_sync_log import (
 )
 from urllib.parse import urlparse
 from connector.security.request_signing import verify_incoming_signed_request
+from connector.security.permissions import require_admin, require_push_endpoint_access
 
 
 def _get_item_image_field():
@@ -59,8 +60,9 @@ def run_image_sync_now():
     """
     Whitelisted entry point for running image sync directly (not enqueued).
     Use from Magento Settings "Sync Images Now" button or bench execute.
-    Runs synchronously in the current process.
+    Runs synchronously in the current process. System Manager only.
     """
+    require_admin("Only System Manager can run image sync.")
     frappe.logger("connector").info("run_image_sync_now: starting direct image sync.")
     result = sync_images()
     frappe.logger("connector").info(f"run_image_sync_now: done. result={result}")
@@ -75,6 +77,7 @@ def receive_image_update(sku, image_url):
     Item image field immediately without a full image sync run.
     """
     logger = frappe.logger("connector")
+    require_push_endpoint_access("receive_image_update")
     verify_incoming_signed_request("receive_image_update")
 
     if not _is_sync_enabled():

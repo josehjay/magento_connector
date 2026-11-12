@@ -1072,9 +1072,11 @@ class MagentoSettings(Document):
         Magento push requests.
         """
         from connector.security.request_signing import get_signature_diagnostics
+        from connector.security.permissions import get_push_role_diagnostics
 
         settings = frappe.get_single("Connector Settings")
         diag = get_signature_diagnostics()
+        role_diag = get_push_role_diagnostics()
 
         verify_enabled = bool(getattr(settings, "enable_signed_push_verification", 0))
         enforce_enabled = bool(getattr(settings, "enforce_signed_push_verification", 0))
@@ -1095,6 +1097,12 @@ class MagentoSettings(Document):
             f"Successful checks   : {diag.get('success_count', 0)}",
             f"Warnings (allowed)  : {diag.get('warning_count', 0)}",
             f"Denied (blocked)    : {diag.get('denied_count', 0)}",
+            "",
+            "=== PUSH ENDPOINT ROLE GATE ===",
+            "",
+            f"Required role       : {role_diag.get('configured_role') or '(not set - any logged-in user allowed)'}",
+            f"Last result         : {role_diag.get('status')}",
+            f"Last detail         : {role_diag.get('detail')}",
         ]
         return _show_report(lines, "Signature Verification Status")
 

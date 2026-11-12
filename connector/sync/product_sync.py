@@ -32,6 +32,7 @@ import time
 import frappe
 from frappe.utils.background_jobs import is_job_enqueued
 from connector.api.magento_client import MagentoClient, MagentoAPIError
+from connector.security.permissions import require_item_write
 from connector.connector.doctype.magento_product_map.magento_product_map import (
     get_magento_product_id,
     upsert_map,
@@ -91,7 +92,9 @@ def _enqueue_product_sync(item_code, mode):
     from the user's request.
     """
     method_by_mode = {
-        "push": ("connector.sync.product_sync.push_item_to_magento", 120),
+        # Internal (unguarded) function: the job runs as the saving user or
+        # Administrator and must not depend on the whitelisted wrapper's guard.
+        "push": ("connector.sync.product_sync._push_item_to_magento", 120),
         "disable": ("connector.sync.product_sync.disable_in_magento", 60),
         "remove": ("connector.sync.product_sync.remove_from_magento", 60),
     }
@@ -677,7 +680,16 @@ def remove_from_magento(item_code, magento_product_id=None, magento_sku=None):
 @frappe.whitelist()
 def push_item_to_magento(item_code):
     """
-    Push a single ERPNext Item to Magento.
+    Whitelisted "Push to Magento" button on the Item form. Requires write
+    permission on the Item; background jobs call _push_item_to_magento().
+    """
+    require_item_write(item_code)
+    return _push_item_to_magento(item_code)
+
+
+def _push_item_to_magento(item_code):
+    """
+    Push a single ERPNext Item to Magento (internal, no permission check).
     On success: resets the retry counter.
     On failure: increments retry counter and records last_failed_at for backoff.
     """
@@ -963,7 +975,7 @@ def _run_batch_product_sync(item_codes, time_budget_seconds=None):
             break
         attempted += 1
         try:
-            push_item_to_magento(item_code)
+            _push_item_to_magento(item_code)
             success += 1
         except Exception as e:
             failed += 1
