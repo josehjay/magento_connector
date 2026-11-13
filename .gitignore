@@ -1,3 +1,8 @@
 # Local tooling / generated artifacts
 .cursor/
 graphify-out/
+
+# Python bytecode / test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/

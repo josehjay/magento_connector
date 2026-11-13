@@ -51,8 +51,14 @@ doc_events = {
         ],
     },
     "Item Price": {
-        "after_insert": "connector.sync.product_sync.on_item_price_change",
-        "on_update": "connector.sync.product_sync.on_item_price_change",
+        "after_insert": [
+            "connector.sync.product_sync.on_item_price_change",
+            "connector.sync.erpnext_product_sync.on_item_price_change",
+        ],
+        "on_update": [
+            "connector.sync.product_sync.on_item_price_change",
+            "connector.sync.erpnext_product_sync.on_item_price_change",
+        ],
         "on_trash": "connector.sync.product_sync.on_item_price_change",
     },
     # Only acts on Item Attributes that are already mapped to Magento — pushes
@@ -66,14 +72,16 @@ doc_events = {
         # on_cancel → cancel the Magento order
         "on_cancel": "connector.sync.status_sync.on_sales_order_cancel",
     },
-    # Delivery Note submitted → create Magento shipment
-    # Delivery Note cancelled → add informational comment to Magento order
+    # Delivery Note submitted → "processing" + "goods dispatched" comment
+    #   (no Magento shipment is created)
+    # Delivery Note cancelled → informational comment only
     "Delivery Note": {
         "on_submit": "connector.sync.status_sync.on_delivery_note_submit",
         "on_cancel": "connector.sync.status_sync.on_delivery_note_cancel",
     },
-    # Sales Invoice submitted → create Magento invoice
-    # Sales Invoice cancelled → add informational comment to Magento order
+    # Sales Invoice submitted → "processing" + "invoice raised" comment
+    #   (the processing step may create a Magento invoice if none exists)
+    # Sales Invoice cancelled → informational comment only
     "Sales Invoice": {
         "on_submit": "connector.sync.status_sync.on_sales_invoice_submit",
         "on_cancel": "connector.sync.status_sync.on_sales_invoice_cancel",
@@ -112,10 +120,6 @@ scheduler_events = {
         "30 2 * * *": [
             "connector.tasks.cleanup_sync_logs",
         ],
-        # Mirror Frappe gunicorn/pypika pins and push to GitHub (opt-in)
-        "15 4 * * *": [
-            "connector.tasks.sync_frappe_pins_to_github",
-        ],
     }
 }
 
@@ -123,8 +127,9 @@ scheduler_events = {
 boot_session = "connector.boot.boot_session"
 
 # Client-side scripts loaded on specific DocType forms
+# Child-table rows (Magento Item Group) are handled inside magento_settings.js:
+# doctype_js for a child doctype never loads in its parent's form.
 doctype_js = {
-    "Magento Item Group": "public/js/magento_item_group.js",
     "Magento Settings":   "public/js/magento_settings.js",
     "Item":               "public/js/item.js",
     "Sales Order":        "public/js/sales_order.js",

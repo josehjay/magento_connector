@@ -24,6 +24,185 @@ class MagentoSettings(Document):
     def validate(self):
         if self.magento_url:
             self.magento_url = _validate_secure_url(self.magento_url, "Magento URL")
+        self._validate_item_groups()
+        self._validate_selected_items()
+
+    def _validate_selected_items(self):
+        """
+        "Selected Items": each row must belong to a "Selected Items Only"
+        group (anything else would be ignored by product sync, which is
+        confusing), no duplicates, and warn when a selected-only group has
+        no picks yet or when already-synced items will stop syncing.
+
+        Items that stop syncing are NOT removed from Magento automatically —
+        the product may have been curated there — so the user is told how
+        many are affected instead.
+        """
+        from connector.sync.product_sync import SYNC_MODE_SELECTED
+
+        selected_groups = {
+            row.item_group
+            for row in self.get("magento_item_groups") or []
+            if row.get("sync_mode") == SYNC_MODE_SELECTED and row.item_group
+        }
+
+        seen = set()
+        picks_per_group = {g: 0 for g in selected_groups}
+        for row in self.get("magento_selected_items") or []:
+            if not row.item_code:
+                continue
+            if row.item_code in seen:
+                frappe.throw(
+                    f"Row {row.idx}: Item '{row.item_code}' is listed more than once "
+                    "in Selected Items."
+                )
+            seen.add(row.item_code)
+            group = row.item_group or frappe.db.get_value("Item", row.item_code, "item_group")
+            row.item_group = group
+            if group not in selected_groups:
+                frappe.throw(
+                    f"Row {row.idx} of Selected Items: Item '{row.item_code}' is in Item Group "
+                    f"'{group or '(none)'}', which is not set to \"Selected Items Only\" in "
+                    "Item Groups to Sync. Remove the row or change that group's Sync Mode."
+                )
+            picks_per_group[group] += 1
+
+        empty = sorted(g for g, n in picks_per_group.items() if not n)
+        if empty:
+            frappe.msgprint(
+                "These groups are set to \"Selected Items Only\" but have no selected "
+                "items, so nothing from them will sync to Magento: "
+                + frappe.utils.escape_html(", ".join(empty))
+                + ". Use Products → Select Items for Group.",
+                title="No Items Selected",
+                indicator="orange",
+            )
+
+        if selected_groups:
+            self._warn_items_leaving_sync(selected_groups, seen)
+
+    def _warn_items_leaving_sync(self, selected_groups, selected_codes):
+        """Count mapped items in selected-only groups that were not picked."""
+        try:
+            mapped = frappe.get_all(
+                "Item",
+                filters={
+                    "item_group": ["in", sorted(selected_groups)],
+                    "sync_to_magento": 1,
+                    "disabled": 0,
+                },
+                pluck="name",
+            )
+            if not mapped:
+                return
+            unpicked = [code for code in mapped if code not in selected_codes]
+            if not unpicked:
+                return
+            count = frappe.db.count(
+                "Magento Product Map", {"item_code": ["in", unpicked]}
+            )
+        except Exception:
+            frappe.logger("connector").warning(
+                "Magento Settings: could not count items leaving sync", exc_info=True
+            )
+            return
+        if not count:
+            return
+        frappe.msgprint(
+            f"{count} item(s) already in Magento belong to \"Selected Items Only\" groups "
+            "but are not selected. Product updates from ERPNext (price, name, attributes) "
+            "stop for them. Their Magento products are NOT deleted or disabled, and "
+            "their stock quantity keeps syncing while they exist — remove them in "
+            "Magento if they should no longer be sold.",
+            title="Items Will Stop Syncing",
+            indicator="orange",
+        )
+
+    @frappe.whitelist()
+    def get_push_security_status(self):
+        """
+        Is the Magento → ERPNext push surface locked down? Used by the form to
+        show a warning banner. Read-only, no secrets returned.
+        """
+        if "System Manager" not in frappe.get_roles():
+            # Not an error: other roles simply don't get the banner.
+            return None
+
+        def _value(field):
+            try:
+                return frappe.db.get_single_value("Connector Settings", field)
+            except Exception:
+                # Field not migrated yet → treat as off.
+                return None
+
+        role = (_value("push_endpoint_role") or "").strip()
+        signing_enabled = bool(_value("enable_signed_push_verification"))
+        signing_enforced = signing_enabled and bool(_value("enforce_signed_push_verification"))
+        return {
+            "push_endpoint_role": role or None,
+            "signing_enabled": signing_enabled,
+            "signing_enforced": signing_enforced,
+            "secure": bool(role) and signing_enforced,
+        }
+
+    def _validate_item_groups(self):
+        """
+        Item Groups to Sync: no duplicate groups, and every row with an
+        attribute set name must carry its Magento attribute_set_id — product
+        sync only reads the ID, so a name without an ID silently falls back
+        to Magento's Default set (4).
+        """
+        seen = set()
+        unresolved = []
+        for row in self.get("magento_item_groups") or []:
+            if row.item_group in seen:
+                frappe.throw(
+                    f"Row {row.idx}: Item Group '{row.item_group}' is listed more than once "
+                    "in Item Groups to Sync."
+                )
+            seen.add(row.item_group)
+            row.attribute_set_name = (row.attribute_set_name or "").strip()
+            if row.attribute_set_name and not row.attribute_set_id:
+                unresolved.append(row)
+
+        if not unresolved:
+            return
+
+        from connector.api.magento_client import MagentoClient
+        from connector.api.magento_options import describe_attribute_set_error
+
+        try:
+            sets = MagentoClient().get_attribute_sets()
+        except Exception as e:
+            frappe.msgprint(
+                "Could not look up the Magento attribute set ID for: "
+                + ", ".join(frappe.utils.escape_html(r.item_group) for r in unresolved)
+                + ". New products in these groups will use Magento's Default set until "
+                "this is fixed.<br><br>"
+                + frappe.utils.escape_html(describe_attribute_set_error(e)),
+                title="Attribute Sets Not Resolved",
+                indicator="orange",
+            )
+            return
+
+        by_name = {s["attribute_set_name"].strip().lower(): s for s in sets}
+        not_found = []
+        for row in unresolved:
+            match = by_name.get(row.attribute_set_name.lower())
+            if match:
+                row.attribute_set_id = match["attribute_set_id"]
+                row.attribute_set_name = match["attribute_set_name"]
+            else:
+                not_found.append(f"{row.item_group} → {row.attribute_set_name}")
+
+        if not_found:
+            frappe.msgprint(
+                "These attribute sets do not exist in Magento, so new products in "
+                "these groups will use Magento's Default set: "
+                + frappe.utils.escape_html(", ".join(not_found)),
+                title="Attribute Sets Not Found",
+                indicator="orange",
+            )
 
     @frappe.whitelist()
     def diagnose_sync(self):
@@ -133,7 +312,9 @@ class MagentoSettings(Document):
                                 f"media_type={entry.get('media_type')}, disabled={entry.get('disabled')}")
                         if magento_url:
                             from connector.sync.image_sync import _extract_base_image_url
-                            url = _extract_base_image_url(media, magento_url.rstrip("/"))
+                            media_base = client.get_media_base_url()
+                            add(f"Media base URL from Magento: {media_base or '(none — using store URL/media/)'}")
+                            url = _extract_base_image_url(media, magento_url.rstrip("/"), media_base)
                             add(f"Extracted base image URL: {url or '(none)'}")
                     else:
                         add("  ⚠ Magento returned EMPTY media list for this product.")
@@ -203,13 +384,8 @@ class MagentoSettings(Document):
         total_items = frappe.db.count("Item")
         add(f"Total items: {total_items}")
 
-        report = "\n".join(lines)
-        frappe.msgprint(
-            f"<pre style='white-space:pre-wrap;font-size:12px;max-height:500px;overflow:auto'>{report}</pre>",
-            title="Sync Diagnostic Report",
-            wide=True,
-        )
-        return report
+        # Escaped: the report contains SKUs and other values from Magento.
+        return _show_report(lines, "Sync Diagnostic Report")
 
     @frappe.whitelist()
     def test_connection(self):
@@ -239,6 +415,13 @@ class MagentoSettings(Document):
                     "searchCriteria[pageSize]": 1,
                     "searchCriteria[currentPage]": 1,
                 },
+            ),
+            (
+                # Needed for the Item Groups → Magento Attribute Set dropdown
+                # (ACL: Stores > Attributes > Attribute Set).
+                "Attribute Sets",
+                "/products/attribute-sets/sets/list",
+                {"searchCriteria[pageSize]": 1},
             ),
         ]
 
@@ -306,7 +489,7 @@ class MagentoSettings(Document):
             # Treat ACL denials as a warning if auth works but required scopes are missing.
             if forbidden_failures:
                 verified = f" Verified resources: {', '.join(successful_checks)}." if successful_checks else ""
-                denied = f" Missing resources: {', '.join(forbidden_failures)}."
+                denied = frappe.utils.escape_html(f" Missing resources: {', '.join(forbidden_failures)}.")
                 frappe.msgprint(
                     "Magento connected, but the integration token has limited API scopes."
                     + f" Auth mode: {auth_mode}."
@@ -327,7 +510,10 @@ class MagentoSettings(Document):
                 indicator="green",
             )
         except Exception as e:
-            frappe.throw(f"Connection failed: {e}", title="Magento Connection Error")
+            frappe.throw(
+                f"Connection failed: {frappe.utils.escape_html(str(e))}",
+                title="Magento Connection Error",
+            )
 
     @frappe.whitelist()
     def trigger_full_product_sync(self):
@@ -378,6 +564,12 @@ class MagentoSettings(Document):
             lines.append(f"Item group filter active: {', '.join(preview['allowed_item_groups'])}")
         else:
             lines.append("Item group filter: (none — all groups eligible)")
+        if preview.get("selected_only_item_groups"):
+            lines.append(
+                "Selected Items Only groups: "
+                f"{', '.join(preview['selected_only_item_groups'])} "
+                f"({preview.get('selected_item_count') or 0} hand-picked item(s))"
+            )
         lines.append("")
         if preview["sample_needs_rebuild"]:
             lines.append("Sample items needing rebuild:")
@@ -584,7 +776,7 @@ class MagentoSettings(Document):
     @frappe.whitelist()
     def reset_order_sync_cursor(self):
         """
-        Clear last_order_sync_time so the next sync fetches orders from the last 30 days.
+        Clear last_order_sync_time so the next sync fetches orders from the last 90 days.
         Use this when orders are missing because the cursor skipped past them.
         """
         frappe.db.set_single_value("Magento Settings", "last_order_sync_time", None)
@@ -652,13 +844,8 @@ class MagentoSettings(Document):
             lines.append(msg)
 
         def show():
-            report = "\n".join(lines)
-            frappe.msgprint(
-                f"<pre style='white-space:pre-wrap;font-size:12px;max-height:600px;overflow:auto'>{report}</pre>",
-                title="Order Import Diagnostic",
-                wide=True,
-            )
-            return report
+            # Escaped: the report contains customer names/emails from Magento.
+            return _show_report(lines, "Order Import Diagnostic")
 
         add("=== ORDER IMPORT DIAGNOSTIC ===")
         add("Fetches the first Magento order (bypassing date filter) and")

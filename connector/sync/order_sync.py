@@ -25,6 +25,7 @@ from connector.connector.doctype.magento_sync_log.magento_sync_log import (
 from connector.sync.customer_sync import get_or_create_customer, get_or_create_address
 from connector.security.request_signing import verify_incoming_signed_request
 from connector.security.permissions import require_admin, require_push_endpoint_access
+from connector.utils import is_magento_enabled
 
 
 MAGENTO_STATUS_NOTES = {
@@ -40,13 +41,11 @@ MAGENTO_STATUS_NOTES = {
 
 
 def _sync_disabled_reason():
-    """Return None when order sync is enabled, otherwise which switch is off."""
-    try:
-        enabled = frappe.db.get_single_value("Connector Settings", "enable_magento_integration")
-        if enabled is not None and not bool(enabled):
-            return "Connector Settings → Enable Magento Integration is off"
-    except Exception:
-        pass
+    """Return None when order sync is enabled, otherwise which switch is off.
+    Same checks as connector.utils.is_magento_sync_enabled(), but names the
+    switch so the push endpoint can report it back to Magento."""
+    if not is_magento_enabled():
+        return "Connector Settings → Enable Magento Integration is off"
     if not frappe.db.get_single_value("Magento Settings", "sync_enabled"):
         return "Magento Settings → Sync Enabled is off"
     return None
@@ -54,6 +53,31 @@ def _sync_disabled_reason():
 
 def _is_sync_enabled():
     return _sync_disabled_reason() is None
+
+
+DEFAULT_LEAD_TIME_DAYS = 3
+
+# Totals within this much of Magento's grand_total are treated as equal
+# (per-line rounding differences between the two systems).
+GRAND_TOTAL_TOLERANCE = 0.01
+
+
+def _lead_time_days(value):
+    """Magento Settings → lead_time_days, honouring an explicit 0 (same-day
+    delivery date); the default applies only when the setting is unset."""
+    if value is None or value == "":
+        return DEFAULT_LEAD_TIME_DAYS
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_LEAD_TIME_DAYS
+
+
+def _to_float(value):
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 @frappe.whitelist()
@@ -168,7 +192,7 @@ def sync_orders():
     settings = frappe.get_single("Magento Settings")
     last_sync = settings.last_order_sync_time
 
-    # On first run (no last_sync), default to the last 30 days to avoid fetching
+    # On first run (no last_sync), default to the last 90 days to avoid fetching
     # the entire order history which times out on large Magento catalogs.
     if not last_sync:
         from datetime import datetime, timedelta
@@ -273,6 +297,14 @@ def _process_order(order, client):
     Returns a dict: {"status": "imported"|"updated"|"skipped", "sales_order": str|None, ...}
     Raises RuntimeError on unrecoverable error so the caller can log it.
     `client` may be None when called from the push endpoint (receive_order).
+
+    Transaction: the buyer customer, addresses, Sales Order and Magento Order
+    Map row are written with commit=False and committed ONCE at the end, after
+    create_map. If anything raises in between, the caller (receive_order /
+    sync_orders) rolls the whole order back, so a failed import never leaves an
+    orphan customer or address. Nothing between the first write and that
+    commit may call create_log (it commits). The skip paths (already imported,
+    cancelled, no matching items) all return before the first write.
     """
     raw_entity_id        = order.get("entity_id")
     magento_order_id     = int(raw_entity_id) if raw_entity_id else None
@@ -314,58 +346,10 @@ def _process_order(order, client):
         )
         return {"status": "skipped", "reason": "cancelled"}
 
-    # ----- Customer -----
-    # Always create/find the real buyer's customer record — we need it for the
-    # shipping address even when a default billing customer is configured.
-    # If a default "Web Sales"-style customer is configured, bill to that
-    # customer; otherwise bill to the real buyer directly.
-    settings_snap = frappe.get_single("Magento Settings")
-    default_customer = (settings_snap.get("default_customer") or "").strip()
-
-    try:
-        real_customer_name = get_or_create_customer(order)
-    except Exception as e:
-        frappe.log_error(frappe.get_traceback(), f"Order #{magento_increment_id}: customer creation failed")
-        if not default_customer:
-            raise RuntimeError(f"Customer creation failed: {e}") from e
-        # The buyer record is optional when billing to the default customer:
-        # buyer name/email/phone still go into the Sales Order remarks, and the
-        # addresses are linked to the default customer instead.
-        logger.warning(
-            f"Order #{magento_increment_id}: buyer customer could not be created ({e}); "
-            f"continuing with default customer '{default_customer}'."
-        )
-        real_customer_name = default_customer
-
-    so_customer = default_customer if default_customer else real_customer_name
-
-    # ----- Address -----
-    # When billing to a default customer (e.g. "Web Sales"), the address must
-    # also be linked to that customer to pass ERPNext's party-address validation.
-    # Create new Magento-derived address docs per order when a default customer
-    # is configured so names and displays never drift across orders.
-    shipping_address_name = None
-    billing_address_name = None
-    try:
-        shipping_address_name = get_or_create_address(
-            order,
-            real_customer_name,
-            also_link_to=so_customer,
-            always_create_new=bool(default_customer),
-            address_kind="shipping",
-        )
-        billing_address_name = get_or_create_address(
-            order,
-            real_customer_name,
-            also_link_to=so_customer,
-            always_create_new=bool(default_customer),
-            address_kind="billing",
-        )
-    except Exception as e:
-        # Address is not mandatory — log and continue
-        logger.warning(f"Order #{magento_increment_id}: address creation failed (continuing): {e}")
-
     # ----- Line items -----
+    # Resolved BEFORE any customer/address write so that an order with no
+    # matching items is skipped without creating anything (the skip log below
+    # commits, which would otherwise persist an orphan buyer record).
     items = _build_order_items(order)
     if not items:
         skipped_skus = [
@@ -387,11 +371,72 @@ def _process_order(order, client):
         )
         return {"status": "skipped", "reason": "no_matching_items", "skus": skipped_skus}
 
+    # ----- Customer -----
+    # Always create/find the real buyer's customer record — we need it for the
+    # shipping address even when a default billing customer is configured.
+    # If a default "Web Sales"-style customer is configured, bill to that
+    # customer; otherwise bill to the real buyer directly.
+    settings_snap = frappe.get_single("Magento Settings")
+    default_customer = (settings_snap.get("default_customer") or "").strip()
+
+    # A savepoint lets the default-customer fallback discard whatever a failed
+    # customer insert half-wrote, without losing the rest of this transaction.
+    frappe.db.savepoint("magento_order_customer")
+    try:
+        real_customer_name = get_or_create_customer(order, commit=False)
+    except Exception as e:
+        frappe.db.rollback(save_point="magento_order_customer")
+        frappe.log_error(frappe.get_traceback(), f"Order #{magento_increment_id}: customer creation failed")
+        if not default_customer:
+            raise RuntimeError(f"Customer creation failed: {e}") from e
+        # The buyer record is optional when billing to the default customer:
+        # buyer name/email/phone still go into the Sales Order remarks, and the
+        # addresses are linked to the default customer instead.
+        logger.warning(
+            f"Order #{magento_increment_id}: buyer customer could not be created ({e}); "
+            f"continuing with default customer '{default_customer}'."
+        )
+        real_customer_name = default_customer
+
+    so_customer = default_customer if default_customer else real_customer_name
+
+    # ----- Address -----
+    # When billing to a default customer (e.g. "Web Sales"), the address must
+    # also be linked to that customer to pass ERPNext's party-address validation.
+    # Create new Magento-derived address docs per order when a default customer
+    # is configured so names and displays never drift across orders.
+    shipping_address_name = None
+    billing_address_name = None
+    frappe.db.savepoint("magento_order_address")
+    try:
+        shipping_address_name = get_or_create_address(
+            order,
+            real_customer_name,
+            also_link_to=so_customer,
+            always_create_new=bool(default_customer),
+            address_kind="shipping",
+            commit=False,
+        )
+        billing_address_name = get_or_create_address(
+            order,
+            real_customer_name,
+            also_link_to=so_customer,
+            always_create_new=bool(default_customer),
+            address_kind="billing",
+            commit=False,
+        )
+    except Exception as e:
+        # Address is not mandatory — log and continue. Roll back to the
+        # savepoint so a half-written address is not committed with the order.
+        frappe.db.rollback(save_point="magento_order_address")
+        shipping_address_name = billing_address_name = None
+        logger.warning(f"Order #{magento_increment_id}: address creation failed (continuing): {e}")
+
     # ----- Taxes & charges -----
     taxes = _build_taxes_and_charges(order)
 
     # ----- Build Sales Order -----
-    lead_time = int(settings_snap.lead_time_days or 3)
+    lead_time = _lead_time_days(settings_snap.lead_time_days)
     delivery_date = add_days(nowdate(), lead_time)
 
     company = _get_default_company()
@@ -449,6 +494,25 @@ def _process_order(order, client):
 
     so.remarks = f"Magento Order #{magento_increment_id}.{buyer_info} Status: {note}"
 
+    # ----- Discount (coupon / cart price rule) -----
+    # Lines are priced from Magento's `price` (excl. tax, BEFORE discount) and
+    # Magento's tax and shipping are added as "Actual" tax rows, so without
+    # this the SO total exceeds Magento's by the discount. Magento's
+    # discount_amount is negative and already includes any shipping discount.
+    # Applying it as an additional discount on "Net Total" lowers the net
+    # total by exactly that amount while the Actual rows stay fixed (Actual
+    # charges are not recomputed from the discounted net), so:
+    #   SO grand_total = sum(price * qty) - discount + tax_amount + shipping_amount
+    # which is how Magento builds grand_total. ("Grand Total" would instead
+    # spread the discount across the tax rows and change the tax figures.)
+    discount = abs(_to_float(order.get("discount_amount")))
+    if discount > 0:
+        so.apply_discount_on = "Net Total"
+        so.additional_discount_percentage = 0
+        so.discount_amount = discount
+        discount_label = (order.get("discount_description") or "").strip() or "Magento discount"
+        so.remarks += f" Discount: {discount_label} (-{discount:.2f})."
+
     for item_row in items:
         so.append("items", item_row)
 
@@ -493,15 +557,26 @@ def _process_order(order, client):
     except Exception as e:
         logger.warning(f"Order #{magento_increment_id}: calculate_taxes_and_totals warning (non-fatal): {e}")
 
+    # Totals check: never fail the import over a mismatch (the order is real and
+    # paid in Magento), but make it visible on the SO and in the sync log.
+    totals_mismatch = _grand_total_mismatch(order, so)
+    if totals_mismatch:
+        logger.warning(f"Order #{magento_increment_id}: {totals_mismatch}")
+        so.remarks += f" {totals_mismatch}"
+
     try:
         so.insert()
     except Exception as e:
         frappe.log_error(frappe.get_traceback(), f"Order #{magento_increment_id}: Sales Order insert failed")
         raise RuntimeError(f"Sales Order insert failed: {e}") from e
 
+    # Insert the map row in the SAME transaction as the Sales Order, then make
+    # the one commit for the whole order (customer, addresses, SO, map).
+    # magento_order_id is unique on the map, so if the push and the 4-hourly
+    # pull race on one order, the loser fails here and its caller rolls back
+    # its Sales Order and customer — instead of committing a duplicate SO.
+    create_map(magento_order_id, magento_increment_id, magento_status, so.name, commit=False)
     frappe.db.commit()
-
-    create_map(magento_order_id, magento_increment_id, magento_status, so.name)
 
     create_log(
         operation="Order Pull",
@@ -509,9 +584,30 @@ def _process_order(order, client):
         doctype_name="Sales Order",
         document_name=so.name,
         magento_id=magento_increment_id,
+        error_message=totals_mismatch or None,
         response_payload={"sales_order": so.name, "customer": so_customer, "buyer": real_customer_name},
     )
     return {"status": "imported", "sales_order": so.name, "customer": so_customer, "real_customer": real_customer_name}
+
+
+def _grand_total_mismatch(order, so):
+    """Return a note when the Sales Order grand total differs from Magento's
+    grand_total (both in the order currency) by more than the tolerance,
+    otherwise None. Orders without a grand_total are not checked."""
+    if order.get("grand_total") in (None, ""):
+        return None
+    try:
+        magento_total = float(order.get("grand_total"))
+        so_total = float(so.grand_total or 0)
+    except (TypeError, ValueError):
+        return None
+    difference = round(so_total - magento_total, 2)
+    if abs(difference) <= GRAND_TOTAL_TOLERANCE:
+        return None
+    return (
+        f"Totals differ from Magento by {difference:+.2f} "
+        f"(ERPNext {so_total:.2f} vs Magento {magento_total:.2f})."
+    )
 
 
 def _get_default_company():
@@ -629,7 +725,7 @@ def _build_order_items(order):
     """
     logger = frappe.logger("connector")
     increment_id = order.get("increment_id", "?")
-    lead_time = int(frappe.db.get_single_value("Magento Settings", "lead_time_days") or 3)
+    lead_time = _lead_time_days(frappe.db.get_single_value("Magento Settings", "lead_time_days"))
     delivery_date = add_days(nowdate(), lead_time)
 
     # Build a map of parent_item_id → configurable SKU for fallback lookups
@@ -692,14 +788,14 @@ def _build_taxes_and_charges(order):
     Skips any charge whose account cannot be found to prevent insert failures.
     """
     charges = []
-    company = (
-        frappe.defaults.get_defaults().get("company")
-        or frappe.db.get_single_value("Global Defaults", "default_company")
-    )
+    # Same resolver as the Sales Order header, so accounts match so.company.
+    company = _get_default_company()
 
+    # Magento's order-level tax_amount is the TOTAL tax, shipping tax included,
+    # so shipping is charged net here (adding shipping_tax_amount again would
+    # double-count it).
     tax_amount = float(order.get("tax_amount") or 0)
     shipping_amount = float(order.get("shipping_amount") or 0)
-    shipping_tax = float(order.get("shipping_tax_amount") or 0)
 
     if tax_amount > 0:
         tax_account = _get_tax_account(company)
@@ -718,7 +814,7 @@ def _build_taxes_and_charges(order):
                 "charge_type": "Actual",
                 "account_head": freight_account,
                 "description": f"Shipping: {order.get('shipping_description') or 'Freight'}",
-                "tax_amount": shipping_amount + shipping_tax,
+                "tax_amount": shipping_amount,
             })
 
     return charges
@@ -785,7 +881,8 @@ def _sync_status_from_magento(magento_order_id, new_magento_status):
     if not sales_order_name:
         return
 
-    update_status(magento_order_id, new_magento_status)
+    # Map row and Sales Order field change together: one commit for both.
+    update_status(magento_order_id, new_magento_status, commit=False)
     frappe.db.set_value("Sales Order", sales_order_name, "magento_order_status", new_magento_status)
     frappe.db.commit()
 

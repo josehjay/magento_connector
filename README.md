@@ -126,13 +126,7 @@ bench setup requirements
 
 That reads `apps/frappe/pyproject.toml`, rewrites the pins, commits, and pushes to GitHub (version bump included). The bench user needs `git push` access to origin.
 
-To run the same job daily from ERPNext, add this to `sites/common_site_config.json` (or the site config):
-
-```json
-"sync_frappe_pins_to_github": 1
-```
-
-GitHub Actions also syncs pins daily from Frappe `version-16` and commits them to this repo.
+Day to day you don't need to run anything: the GitHub Actions workflow `.github/workflows/check-frappe-pins.yml` syncs the pins daily from Frappe `version-16` and commits them to this repo. (The old opt-in `sync_frappe_pins_to_github` scheduler job that pushed to GitHub from the ERPNext server has been removed; the `sync_frappe_pins_to_github` site-config key no longer does anything.)
 
 ### 3. Magento side setup (one-time, only if using Magento integration)
 1. In Magento Admin → **System → Extensions → Integrations**

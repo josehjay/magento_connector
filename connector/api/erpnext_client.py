@@ -4,6 +4,7 @@ Handles authentication and CRUD operations for Items on remote ERPNext sites.
 Uses Frappe token-based authentication (API Key + Secret).
 """
 
+import json
 import time
 import frappe
 import requests
@@ -78,6 +79,13 @@ class ERPNextClient:
                     )
                 time.sleep(self.RETRY_BACKOFF ** attempt)
 
+        # Only reached when every attempt was rate-limited (429); without this
+        # the method returned None and callers crashed on result.get().
+        raise ERPNextAPIError(
+            f"Request to {self.site_name} still rate-limited after {self.MAX_RETRIES} attempts",
+            429,
+        )
+
     def get(self, endpoint, params=None):
         return self._request("GET", endpoint, params=params)
 
@@ -127,3 +135,65 @@ class ERPNextClient:
             if e.status_code == 404:
                 return False
             raise
+
+    # ------------------------------------------------------------------
+    # Item Prices
+    # ------------------------------------------------------------------
+
+    def find_item_price(self, item_code, price_list):
+        """
+        GET /api/resource/Item Price filtered by item_code + price_list +
+        selling=1. Returns {"name", "price_list_rate"} or None.
+        """
+        result = self.get(
+            "/api/resource/Item Price",
+            params={
+                "filters": json.dumps([
+                    ["item_code", "=", item_code],
+                    ["price_list", "=", price_list],
+                    ["selling", "=", 1],
+                ]),
+                "fields": json.dumps(["name", "price_list_rate"]),
+                "limit_page_length": 1,
+            },
+        )
+        rows = result.get("data") if isinstance(result, dict) else None
+        return rows[0] if rows else None
+
+    def create_item_price(self, item_code, price_list, rate):
+        """POST /api/resource/Item Price — selling price for item on price_list."""
+        result = self.post(
+            "/api/resource/Item Price",
+            data={
+                "item_code": item_code,
+                "price_list": price_list,
+                "price_list_rate": rate,
+                "selling": 1,
+            },
+        )
+        return result.get("data", result)
+
+    def update_item_price(self, name, rate):
+        """PUT /api/resource/Item Price/{name} — change price_list_rate."""
+        result = self.put(
+            f"/api/resource/Item Price/{requests.utils.quote(name, safe='')}",
+            data={"price_list_rate": rate},
+        )
+        return result.get("data", result)
+
+    def upsert_item_price(self, item_code, price_list, rate):
+        """
+        Create or update the remote selling Item Price. Returns "created",
+        "updated" or "unchanged". The remote site must already have a Price
+        List with the same name, or the create fails with a link error.
+        """
+        rate = float(rate)
+        existing = self.find_item_price(item_code, price_list)
+        if existing:
+            current = existing.get("price_list_rate")
+            if current is not None and abs(float(current) - rate) < 1e-9:
+                return "unchanged"
+            self.update_item_price(existing["name"], rate)
+            return "updated"
+        self.create_item_price(item_code, price_list, rate)
+        return "created"

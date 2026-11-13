@@ -87,23 +87,50 @@ def _record_push_role_diag(status: str, detail: str):
         pass
 
 
+def _get_user_type(user):
+    """User.user_type ("System User" / "Website User"), or "" when unknown."""
+    try:
+        return (frappe.db.get_value("User", user, "user_type") or "").strip()
+    except Exception:
+        return ""
+
+
 def require_push_endpoint_access(endpoint_name: str):
     """
     Role gate for inbound Magento push endpoints.
 
+    - Administrator always passes.
     - Connector Settings → push_endpoint_role set: the calling user must hold
       that role (System Manager / Administrator always pass).
-    - Not set: allowed exactly as before, but a warning is logged and recorded
-      in the signature diagnostics so the site owner can see it.
+    - Not set: only System Users pass (with a warning recorded in the signature
+      diagnostics so the site owner sees it). The Magento extension calls these
+      endpoints with a System User's API key, so it keeps working; Guest and
+      portal/website users (e.g. storefront customers who can log in to the
+      ERPNext site) are denied — `@frappe.whitelist()` alone would let them in.
     """
     logger = frappe.logger("connector")
     role = _get_push_endpoint_role()
     user = frappe.session.user
 
+    if user == ADMINISTRATOR:
+        _record_push_role_diag("ok", f"{endpoint_name}: '{user}' allowed (Administrator).")
+        return
+
     if not role:
+        user_type = _get_user_type(user) if user and user != "Guest" else ""
+        if user_type != "System User":
+            detail = (
+                f"{endpoint_name}: denied '{user}' — no 'Role allowed to call push endpoints' "
+                f"is set in Connector Settings, so only System Users may call push endpoints "
+                f"(user type: '{user_type or 'Guest'}')."
+            )
+            logger.warning(f"push_role_gate: {detail}")
+            _record_push_role_diag("denied", detail)
+            frappe.throw("Not permitted to call this push endpoint.", frappe.PermissionError)
+
         detail = (
             f"{endpoint_name}: called by '{user}' with no 'Role allowed to call push endpoints' "
-            "set in Connector Settings — any logged-in user can call push endpoints."
+            "set in Connector Settings — any System User can call push endpoints."
         )
         logger.warning(f"push_role_gate: {detail}")
         _record_push_role_diag("not_configured", detail)

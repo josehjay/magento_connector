@@ -13,7 +13,10 @@
   "last_synced_on",
   "sync_status",
   "retry_count",
-  "last_failed_at"
+  "last_failed_at",
+  "stock_section",
+  "last_pushed_qty",
+  "last_stock_push_on"
  ],
  "fields": [
   {
@@ -67,10 +70,30 @@
    "fieldtype": "Datetime",
    "label": "Last Failed At",
    "description": "Timestamp of the last failed sync attempt (used for exponential backoff)"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "stock_section",
+   "fieldtype": "Section Break",
+   "label": "Stock"
+  },
+  {
+   "fieldname": "last_pushed_qty",
+   "fieldtype": "Float",
+   "label": "Last Pushed Qty",
+   "read_only": 1,
+   "description": "Available qty last sent to Magento by the inventory sync (only changes are pushed)"
+  },
+  {
+   "fieldname": "last_stock_push_on",
+   "fieldtype": "Datetime",
+   "label": "Last Stock Push On",
+   "read_only": 1,
+   "description": "When stock was last pushed; items are re-pushed at least every 24 hours"
   }
  ],
  "links": [],
- "modified": "2024-01-01 00:00:00.000000",
+ "modified": "2026-11-13 15:00:00.000000",
  "modified_by": "Administrator",
  "module": "Connector",
  "name": "Magento Product Map",

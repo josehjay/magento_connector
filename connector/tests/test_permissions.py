@@ -21,7 +21,7 @@ def _raise(message=None, exc=Exception, *args, **kwargs):
     raise exc(message)
 
 
-def _mock_frappe(user="test@example.com", roles=(), push_role=""):
+def _mock_frappe(user="test@example.com", roles=(), push_role="", user_type="System User"):
     """frappe MagicMock whose throw() raises and whose role lookups are real."""
     mock = MagicMock()
     mock.PermissionError = _PermissionError
@@ -31,6 +31,9 @@ def _mock_frappe(user="test@example.com", roles=(), push_role=""):
     mock.get_roles.return_value = list(roles)
     mock.db.get_single_value.side_effect = (
         lambda doctype, field: push_role if field == "push_endpoint_role" else None
+    )
+    mock.db.get_value.side_effect = (
+        lambda doctype, name, field=None, *a, **k: user_type if (doctype, field) == ("User", "user_type") else None
     )
     return mock
 

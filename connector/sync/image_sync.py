@@ -8,13 +8,14 @@ Uses 'image' or 'item_image' depending on what exists on Item.
 """
 
 import frappe
-from connector.api.magento_client import MagentoClient, MagentoAPIError
+from connector.api.magento_client import MagentoClient, MagentoAPIError, MEDIA_BASE_URL_LAST_KEY
 from connector.connector.doctype.magento_sync_log.magento_sync_log import (
     create_log,
 )
 from urllib.parse import urlparse
 from connector.security.request_signing import verify_incoming_signed_request
 from connector.security.permissions import require_admin, require_push_endpoint_access
+from connector.utils import is_magento_sync_enabled
 
 
 def _get_item_image_field():
@@ -26,17 +27,16 @@ def _get_item_image_field():
     return None
 
 
-def _is_sync_enabled():
-    try:
-        enabled = frappe.db.get_single_value("Connector Settings", "enable_magento_integration")
-        if enabled is not None and not bool(enabled):
-            return False
-    except Exception:
-        pass
-    return bool(frappe.db.get_single_value("Magento Settings", "sync_enabled"))
+# Kept as a module-level name: tests patch it.
+_is_sync_enabled = is_magento_sync_enabled
 
 
-def _is_safe_image_url(image_url, expected_magento_url):
+def _is_safe_image_url(image_url, expected_magento_url, media_base_url=None):
+    """
+    Accept only http(s) URLs (https unless localhost) whose host is the
+    Magento host or, when media is served from a CDN / cloud storage, the
+    host of Magento's media base URL.
+    """
     image_url = (image_url or "").strip()
     if not image_url or len(image_url) > 2048:
         return False
@@ -45,9 +45,13 @@ def _is_safe_image_url(image_url, expected_magento_url):
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return False
 
-    expected = urlparse((expected_magento_url or "").strip())
-    if expected.hostname and parsed.hostname:
-        if expected.hostname.lower() != parsed.hostname.lower():
+    allowed_hosts = set()
+    for base in (expected_magento_url, media_base_url):
+        host = urlparse((base or "").strip()).hostname
+        if host:
+            allowed_hosts.add(host.lower())
+    if allowed_hosts and parsed.hostname:
+        if parsed.hostname.lower() not in allowed_hosts:
             return False
 
     host = (parsed.hostname or "").lower()
@@ -90,7 +94,7 @@ def receive_image_update(sku, image_url):
         return {"ok": False, "reason": "invalid_sku"}
 
     magento_url = (frappe.db.get_single_value("Magento Settings", "magento_url") or "").strip().rstrip("/")
-    if not _is_safe_image_url(image_url, magento_url):
+    if not _is_safe_image_url(image_url, magento_url, _get_media_base_url_for_validation(image_url, magento_url)):
         logger.warning(f"receive_image_update: rejected unsafe image_url for SKU '{sku}'.")
         return {"ok": False, "reason": "invalid_image_url"}
 
@@ -142,11 +146,14 @@ def sync_images():
         return {"status": "skipped", "reason": "no_magento_url"}
     magento_url = magento_url.rstrip("/")
 
+    # Ordered by item_code and walked with a cursor: this job never updates
+    # last_synced_on, so ordering by it re-processed the same first
+    # MAX_ITEMS_PER_RUN items every run and the rest never got images.
     mapped = frappe.get_all(
         "Magento Product Map",
         filters={"sync_status": "Synced"},
         fields=["item_code", "magento_sku"],
-        order_by="last_synced_on asc",
+        order_by="item_code asc",
     )
 
     if not mapped:
@@ -159,6 +166,10 @@ def sync_images():
         frappe.log_error(frappe.get_traceback(), "Magento Image Sync: Client Init Failed")
         return {"status": "error", "reason": f"client_init_failed: {e}"}
 
+    # Resolved once per run (and cached 6h by the client); None → legacy
+    # {magento_url}/media/ URLs.
+    media_base_url = _safe_media_base_url(client)
+
     updated = 0
     skipped = 0
     no_media = 0
@@ -166,12 +177,13 @@ def sync_images():
     COMMIT_EVERY = 25
     MAX_ITEMS_PER_RUN = 200
 
+    batch = _next_image_batch(mapped, MAX_ITEMS_PER_RUN)
     logger.info(
         f"sync_images: starting — {len(mapped)} mapped items, "
-        f"processing up to {MAX_ITEMS_PER_RUN}, image_field={image_field}."
+        f"processing {len(batch)} from cursor {batch[0]['item_code']!r}, image_field={image_field}."
     )
 
-    for row in mapped[:MAX_ITEMS_PER_RUN]:
+    for row in batch:
         item_code = row["item_code"]
         sku = row["magento_sku"] or item_code
 
@@ -194,7 +206,7 @@ def sync_images():
                             "Check Magento admin → Catalog → Products → Images and Videos.")
             continue
 
-        base_image_url = _extract_base_image_url(media_entries, magento_url)
+        base_image_url = _extract_base_image_url(media_entries, magento_url, media_base_url)
 
         if not base_image_url:
             no_media += 1
@@ -235,12 +247,14 @@ def sync_images():
     if updated:
         frappe.db.commit()
 
+    _save_image_cursor(batch[-1]["item_code"])
+
     summary = {
         "updated": updated,
         "skipped_already_current": skipped,
         "no_media_in_magento": no_media,
         "failed": failed,
-        "total_processed": min(len(mapped), MAX_ITEMS_PER_RUN),
+        "total_processed": len(batch),
         "total_mapped": len(mapped),
     }
 
@@ -256,28 +270,111 @@ def sync_images():
     return summary
 
 
-def _extract_base_image_url(media_entries, magento_url):
+IMAGE_SYNC_CURSOR_KEY = "connector:image_sync:cursor"
+
+
+def _next_image_batch(mapped, size):
+    """
+    Return up to `size` rows starting after the saved cursor (rows are sorted
+    by item_code), wrapping around to the start so every mapped item is
+    visited over successive runs.
+    """
+    if len(mapped) <= size:
+        return list(mapped)
+    try:
+        cursor = frappe.cache().get_value(IMAGE_SYNC_CURSOR_KEY) or ""
+    except Exception:
+        cursor = ""
+    start = 0
+    if cursor:
+        codes = [row["item_code"] for row in mapped]
+        if cursor in codes:
+            # Exact match first: DB collation order can differ from Python's.
+            start = (codes.index(cursor) + 1) % len(codes)
+        else:
+            start = next((i for i, code in enumerate(codes) if code > cursor), 0)
+    rotated = mapped[start:] + mapped[:start]
+    return rotated[:size]
+
+
+def _save_image_cursor(item_code):
+    try:
+        frappe.cache().set_value(IMAGE_SYNC_CURSOR_KEY, item_code)
+    except Exception:
+        pass
+
+
+def _safe_media_base_url(client):
+    """client.get_media_base_url(), never raising (None on any failure)."""
+    try:
+        return client.get_media_base_url()
+    except Exception:
+        return None
+
+
+def _get_cached_media_base_url():
+    """Last media base URL a MagentoClient resolved (cache only, no API call)."""
+    try:
+        return frappe.cache().get_value(MEDIA_BASE_URL_LAST_KEY) or None
+    except Exception:
+        return None
+
+
+def _get_media_base_url_for_validation(image_url, magento_url):
+    """
+    Media base URL to trust in receive_image_update. Uses the cached value
+    when available; only asks Magento when the pushed URL is on a foreign
+    host (so the common same-host push costs no API call).
+    """
+    cached = _get_cached_media_base_url()
+    if cached:
+        return cached
+    image_host = (urlparse((image_url or "").strip()).hostname or "").lower()
+    magento_host = (urlparse(magento_url or "").hostname or "").lower()
+    if not image_host or image_host == magento_host:
+        return None
+    try:
+        return MagentoClient().get_media_base_url()
+    except Exception:
+        return None
+
+
+def _build_media_url(file_path, magento_url, media_base_url):
+    if media_base_url:
+        return f"{media_base_url.rstrip('/')}/catalog/product/{file_path.lstrip('/')}"
+    return f"{(magento_url or '').rstrip('/')}/media/catalog/product/{file_path.lstrip('/')}"
+
+
+def _extract_base_image_url(media_entries, magento_url, media_base_url=None):
     """
     Given a list of Magento media gallery entries, find the one with type 'image'
     (base image) and construct its full URL.
 
-    Magento media path format: /catalog/product/x/x/filename.jpg
-    Full URL: {magento_url}/media/catalog/product{file_path}
+    Magento media path format: /x/x/filename.jpg (relative to catalog/product)
+    Full URL: {media_base_url}catalog/product{file_path}
+
+    media_base_url comes from MagentoClient.get_media_base_url() (CDN / cloud
+    storage aware). When the caller does not pass it, the last value any
+    client resolved is taken from cache; failing that, the legacy
+    {magento_url}/media/ base is used.
     """
     if not media_entries:
         return None
+
+    if not media_base_url:
+        media_base_url = _get_cached_media_base_url()
 
     for entry in media_entries:
         types = entry.get("types") or []
         if "image" in types:
             file_path = entry.get("file") or ""
             if file_path:
-                return f"{magento_url}/media/catalog/product{file_path}"
+                return _build_media_url(file_path, magento_url, media_base_url)
 
     first = media_entries[0] if media_entries else None
     if first:
         file_path = first.get("file") or ""
         if file_path:
-            return f"{magento_url}/media/catalog/product{file_path}"
+            return _build_media_url(file_path, magento_url, media_base_url)
 
     return None

@@ -35,8 +35,14 @@ def get_sales_order_for_magento_order(magento_order_id):
     )
 
 
-def create_map(magento_order_id, magento_increment_id, magento_status, sales_order):
-    """Record a new Magento → ERPNext order mapping."""
+def create_map(magento_order_id, magento_increment_id, magento_status, sales_order, commit=True):
+    """
+    Record a new Magento → ERPNext order mapping.
+
+    `commit=False` leaves the commit to the caller: the order import writes the
+    customer, addresses, Sales Order and this row in one transaction and commits
+    once, so a failure part-way never leaves orphan rows behind.
+    """
     doc = frappe.new_doc("Magento Order Map")
     doc.magento_order_id = magento_order_id
     doc.magento_increment_id = magento_increment_id
@@ -44,11 +50,15 @@ def create_map(magento_order_id, magento_increment_id, magento_status, sales_ord
     doc.sales_order = sales_order
     doc.imported_on = frappe.utils.now_datetime()
     doc.insert(ignore_permissions=True)
-    frappe.db.commit()
+    if commit:
+        frappe.db.commit()
 
 
-def update_status(magento_order_id, new_status):
-    """Update the stored Magento status for an existing order map entry."""
+def update_status(magento_order_id, new_status, commit=True):
+    """
+    Update the stored Magento status for an existing order map entry.
+    `commit=False` lets the caller commit it together with its own writes.
+    """
     name = frappe.db.get_value(
         "Magento Order Map", {"magento_order_id": magento_order_id}, "name"
     )
@@ -61,4 +71,5 @@ def update_status(magento_order_id, new_status):
                 "last_status_sync": frappe.utils.now_datetime(),
             },
         )
-        frappe.db.commit()
+        if commit:
+            frappe.db.commit()

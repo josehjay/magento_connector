@@ -11,7 +11,7 @@ from frappe.utils.background_jobs import is_job_enqueued
 from connector.api.magento_client import MagentoClient, MagentoAPIError
 from connector.connector.doctype.magento_product_map.magento_product_map import upsert_map
 from connector.connector.doctype.magento_sync_log.magento_sync_log import create_log
-from connector.sync.product_sync import _get_allowed_item_groups
+from connector.sync.product_sync import get_eligible_item_rows, get_sync_scope
 
 # Cache key: test must pass before full rebuild is allowed (per user, 24 h).
 TEST_PASSED_CACHE_KEY = "magento_product_map_rebuild_test_passed"
@@ -42,20 +42,17 @@ def _progress_cache_key(run_id):
     return f"{REBUILD_PROGRESS_KEY_PREFIX}:{run_id}"
 
 
-def _get_eligible_items():
+def _get_eligible_items(scope=None):
     """
     Items with sync_to_magento enabled and not disabled, respecting Magento
-    Settings item groups. Templates (has_variants) are listed before variants.
+    Settings item groups (and the hand-picked list for "Selected Items Only"
+    groups — same rule as product sync). Templates (has_variants) are listed
+    before variants.
     """
-    filters = {"sync_to_magento": 1, "disabled": 0}
-    allowed_groups = _get_allowed_item_groups()
-    if allowed_groups:
-        filters["item_group"] = ["in", list(allowed_groups)]
-
-    items = frappe.get_all(
-        "Item",
-        filters=filters,
-        fields=["item_code", "has_variants", "variant_of", "magento_product_id"],
+    items = get_eligible_item_rows(
+        {"sync_to_magento": 1, "disabled": 0},
+        ["item_code", "has_variants", "variant_of", "magento_product_id"],
+        scope=scope,
         order_by="item_code asc",
     )
     items.sort(key=lambda row: (0 if row.get("has_variants") else 1, row["item_code"]))
@@ -110,7 +107,8 @@ def get_rebuild_preview():
     """Return counts and sample rows without calling Magento per item."""
     _require_system_manager()
 
-    items = _get_eligible_items()
+    scope = get_sync_scope()
+    items = _get_eligible_items(scope)
     mapped_ok = 0
     pending_not_in_magento = 0
     needs_rebuild = []
@@ -137,7 +135,9 @@ def get_rebuild_preview():
         "needs_rebuild": len(needs_rebuild),
         "item_id_without_map": id_on_item_only,
         "sample_needs_rebuild": needs_rebuild[:10],
-        "allowed_item_groups": list(_get_allowed_item_groups()) or None,
+        "allowed_item_groups": sorted(scope.allowed_groups) or None,
+        "selected_only_item_groups": sorted(scope.selected_only_groups) or None,
+        "selected_item_count": len(scope.selected_items) if scope.selected_only_groups else None,
         "active_rebuild": progress if progress.get("status") == "running" else None,
     }
 
@@ -188,7 +188,7 @@ def rebuild_map_for_item(
         if _is_synced_map(map_row):
             result.update(
                 status="skipped_existing",
-                magento_product_id=map_row.magento_product_id,
+                magento_product_id=map_row.get("magento_product_id"),
                 message="Already mapped — skipped (no Magento API call)",
             )
             return result

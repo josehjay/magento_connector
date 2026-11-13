@@ -10,6 +10,10 @@ from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 
+# Last media base URL resolved by any MagentoClient (see get_media_base_url).
+MEDIA_BASE_URL_LAST_KEY = "connector:magento_media_base_url:last"
+
+
 class MagentoAPIError(Exception):
     """Raised when Magento returns a non-2xx response."""
     def __init__(self, message, status_code=None, response_body=None):
@@ -138,7 +142,7 @@ class MagentoClient:
     # HTTP helpers
     # ------------------------------------------------------------------
 
-    def _request(self, method, endpoint, data=None, params=None, timeout=None):
+    def _request(self, method, endpoint, data=None, params=None, timeout=None, prefer_global=False):
         """
         Execute an HTTP request with retry on rate-limit (429) and timeouts.
 
@@ -148,11 +152,16 @@ class MagentoClient:
         three minutes, instead of the ~6+ minutes a 120s read timeout allowed.
         Callers doing something legitimately slower (e.g. bulk order pulls)
         pass their own `timeout=` override.
+
+        `prefer_global=True` tries /rest/V1 before /rest/{store}/V1 — for
+        resources that are not store-scoped (attribute sets, EAV metadata),
+        so a wrong store code cannot hide them.
         """
         req_timeout = timeout or (10, 45)  # (connect_timeout, read_timeout)
         last_error = None
+        api_bases = list(reversed(self.api_bases)) if prefer_global else self.api_bases
 
-        for api_base in self.api_bases:
+        for api_base in api_bases:
             self.api_base = api_base
             url = f"{api_base}{endpoint}"
 
@@ -202,8 +211,10 @@ class MagentoClient:
             raise last_error
         raise MagentoAPIError("Magento API request failed for an unknown reason.")
 
-    def get(self, endpoint, params=None, timeout=None):
-        return self._request("GET", endpoint, params=params, timeout=timeout)
+    def get(self, endpoint, params=None, timeout=None, prefer_global=False):
+        return self._request(
+            "GET", endpoint, params=params, timeout=timeout, prefer_global=prefer_global
+        )
 
     def post(self, endpoint, data=None):
         return self._request("POST", endpoint, data=data)
@@ -327,6 +338,60 @@ class MagentoClient:
         """GET /V1/products/{sku}/media — returns list of media entries."""
         return self.get(f"/products/{requests.utils.quote(sku, safe='')}/media")
 
+    MEDIA_BASE_URL_CACHE_TTL = 6 * 60 * 60  # seconds
+
+    def _media_base_url_cache_key(self):
+        return f"connector:magento_media_base_url:{self.base_url}:{self.store_code}"
+
+    def get_media_base_url(self):
+        """
+        Return Magento's media base URL (always ending in "/"), e.g.
+        "https://cdn.example.com/media/".
+
+        Product image URLs used to be built as {magento_url}/media/..., which
+        is wrong when media is served from a CDN / cloud storage bucket (the
+        store runs a CloudStorage module). Magento publishes the real base in
+        GET /V1/store/storeConfigs: prefer secure_base_media_url, then
+        base_media_url, from the entry matching our store code (else the
+        first). Cached in frappe.cache for 6 hours. Returns None when the call
+        fails or no URL is published; callers fall back to {magento_url}/media/.
+        """
+        key = self._media_base_url_cache_key()
+        try:
+            cached = frappe.cache().get_value(key)
+        except Exception:
+            cached = None
+        if cached:
+            return cached
+
+        try:
+            configs = self.get("/store/storeConfigs")
+        except Exception as e:
+            frappe.logger("connector").warning(f"get_media_base_url: storeConfigs failed: {e}")
+            return None
+        if isinstance(configs, dict):
+            configs = [configs]
+        if not isinstance(configs, list):
+            return None
+        configs = [c for c in configs if isinstance(c, dict)]
+        if not configs:
+            return None
+        entry = next((c for c in configs if c.get("code") == self.store_code), configs[0])
+        url = (entry.get("secure_base_media_url") or entry.get("base_media_url") or "").strip()
+        if not url:
+            return None
+        url = url.rstrip("/") + "/"
+        try:
+            frappe.cache().set_value(key, url, expires_in_sec=self.MEDIA_BASE_URL_CACHE_TTL)
+            # Also remember it under a store-agnostic key so helpers without a
+            # client (e.g. image URL building) can use it without an API call.
+            frappe.cache().set_value(
+                MEDIA_BASE_URL_LAST_KEY, url, expires_in_sec=self.MEDIA_BASE_URL_CACHE_TTL
+            )
+        except Exception:
+            pass
+        return url
+
     # ------------------------------------------------------------------
     # Orders
     # ------------------------------------------------------------------
@@ -438,6 +503,22 @@ class MagentoClient:
                     "is_visible_on_front":  0,
                     # Deliberately omitting "status" — the standard endpoint
                     # rejects any status not already in the order's history.
+                }
+            },
+        )
+
+    def add_order_comment(self, order_id, comment, notify_customer=False):
+        """
+        POST /V1/orders/{id}/comments — informational history comment only.
+        Never changes the order status and never creates an invoice.
+        """
+        return self.post(
+            f"/orders/{int(order_id)}/comments",
+            data={
+                "statusHistory": {
+                    "comment":              comment,
+                    "is_customer_notified": 1 if notify_customer else 0,
+                    "is_visible_on_front":  0,
                 }
             },
         )
@@ -608,51 +689,72 @@ class MagentoClient:
     # Attribute sets, categories, product attributes (for Item form options)
     # ------------------------------------------------------------------
 
+    ATTRIBUTE_SET_PAGE_SIZE = 200
+    ATTRIBUTE_SET_MAX_PAGES = 20
+
     def get_attribute_sets(self):
         """
-        GET attribute sets for catalog_product (product attribute sets).
-        Tries /products/attribute-sets/sets/list first (common in Magento 2), then /eav/attribute-sets/list.
-        Returns list of dicts with attribute_set_id, attribute_set_name.
+        Return the catalog_product attribute sets as a list of
+        {attribute_set_id, attribute_set_name}, sorted by name.
+
+        Tries GET /products/attribute-sets/sets/list, then the generic
+        /eav/attribute-sets/list filtered to catalog_product. Both need the
+        integration ACL resource Magento_Catalog::sets
+        (Stores > Attributes > Attribute Set).
+
+        Raises MagentoAPIError when every endpoint fails, so callers can show
+        the real reason (usually a missing ACL resource) instead of an empty
+        list. An empty list means Magento answered but returned no sets.
         """
-        params = {
-            "searchCriteria[pageSize]": 200,
+        eav_filter = {
+            "searchCriteria[filterGroups][0][filters][0][field]": "entity_type_code",
+            "searchCriteria[filterGroups][0][filters][0][value]": "catalog_product",
+            "searchCriteria[filterGroups][0][filters][0][conditionType]": "eq",
         }
-        items = []
+        attempts = (
+            ("/products/attribute-sets/sets/list", {}),
+            ("/eav/attribute-sets/list", eav_filter),
+        )
 
-        # Try 1: Magento 2 products attribute sets (common endpoint)
-        try:
-            result = self.get("/products/attribute-sets/sets/list", params=params)
-            items = self._parse_attribute_sets_response(result)
-        except MagentoAPIError:
-            pass
-
-        # Try 2: EAV attribute sets with entity type filter
-        if not items:
+        errors = []
+        for endpoint, extra_params in attempts:
             try:
-                params["searchCriteria[filterGroups][0][filters][0][field]"] = "entity_type_code"
-                params["searchCriteria[filterGroups][0][filters][0][value]"] = "catalog_product"
-                result = self.get("/eav/attribute-sets/list", params=params)
-                items = self._parse_attribute_sets_response(result)
-            except MagentoAPIError:
-                pass
+                items = self._get_all_attribute_set_pages(endpoint, extra_params)
+            except MagentoAPIError as e:
+                errors.append(e)
+                continue
+            if items:
+                return sorted(items, key=lambda s: s["attribute_set_name"].lower())
 
-        # Try 3: Global path (no store code) for some Magento setups
-        if not items:
-            try:
-                base_global = f"{self.base_url}/rest/V1"
-                url = f"{base_global}/products/attribute-sets/sets/list"
-                resp = self.session.request("GET", url, params={"searchCriteria[pageSize]": 200}, timeout=30)
-                if resp.status_code == 200 and resp.text:
-                    items = self._parse_attribute_sets_response(resp.json())
-                else:
-                    url = f"{base_global}/eav/attribute-sets/list"
-                    resp = self.session.request("GET", url, params=params, timeout=30)
-                    if resp.status_code == 200 and resp.text:
-                        items = self._parse_attribute_sets_response(resp.json())
-            except Exception:
-                pass
+        if errors and len(errors) == len(attempts):
+            # Prefer an auth/ACL failure: it is the actionable one.
+            auth_errors = [e for e in errors if e.status_code in (401, 403)]
+            raise (auth_errors or errors)[0]
+        return []
 
-        return items
+    def _get_all_attribute_set_pages(self, endpoint, extra_params):
+        """Page through an attribute-set list endpoint and parse every page."""
+        out, seen = [], set()
+        for page in range(1, self.ATTRIBUTE_SET_MAX_PAGES + 1):
+            params = {
+                "searchCriteria[pageSize]": self.ATTRIBUTE_SET_PAGE_SIZE,
+                "searchCriteria[currentPage]": page,
+                **extra_params,
+            }
+            result = self.get(endpoint, params=params, prefer_global=True)
+            batch = self._parse_attribute_sets_response(result)
+            new = [s for s in batch if s["attribute_set_id"] not in seen]
+            seen.update(s["attribute_set_id"] for s in new)
+            out.extend(new)
+
+            total = result.get("total_count") if isinstance(result, dict) else None
+            # Magento returns the last page again when currentPage overshoots,
+            # so stop on a short page, no new ids, or the reported total.
+            if len(batch) < self.ATTRIBUTE_SET_PAGE_SIZE or not new:
+                break
+            if total is not None and len(out) >= int(total):
+                break
+        return out
 
     def _parse_attribute_sets_response(self, result):
         """Parse Magento attribute sets list from various response shapes."""
@@ -696,31 +798,59 @@ class MagentoClient:
             out.extend(self._flatten_category_tree(child, path + " > "))
         return out
 
+    CATEGORY_PAGE_SIZE = 500
+    CATEGORY_MAX_PAGES = 50
+
     def get_categories(self):
         """
         GET category tree and return flat list of {id, name, path} for dropdowns.
         Uses /V1/categories/list or flattens tree from /V1/categories.
+
+        /categories/list is paged: a single 500-row request silently truncated
+        large catalogs, so walk currentPage until a short page, the reported
+        total_count, a page with no new ids (Magento repeats the last page
+        when currentPage overshoots) or the page cap.
         """
-        try:
-            params = {"searchCriteria[pageSize]": 500}
-            result = self.get("/categories/list", params=params)
-        except MagentoAPIError:
-            result = None
-        if result is not None:
+        out = []
+        seen = set()
+        for page in range(1, self.CATEGORY_MAX_PAGES + 1):
+            try:
+                params = {
+                    "searchCriteria[pageSize]": self.CATEGORY_PAGE_SIZE,
+                    "searchCriteria[currentPage]": page,
+                }
+                result = self.get("/categories/list", params=params)
+            except MagentoAPIError:
+                # Page 1 failing leaves `out` empty → fall back to the tree;
+                # a later failure keeps the pages already fetched.
+                break
+            if result is None:
+                break
             items = result.get("items", result) if isinstance(result, dict) else result
             if not isinstance(items, list):
                 items = [items] if items else []
-            out = []
+            new_rows = 0
             for x in items:
-                if isinstance(x, dict):
-                    out.append({
-                        "id": int(x.get("id", 0)),
-                        "name": x.get("name", str(x.get("id", ""))),
-                        "path": x.get("path", ""),
-                        "level": int(x.get("level", 0)),
-                    })
-            if out:
-                return out
+                if not isinstance(x, dict):
+                    continue
+                cid = int(x.get("id", 0))
+                if cid in seen:
+                    continue
+                seen.add(cid)
+                new_rows += 1
+                out.append({
+                    "id": cid,
+                    "name": x.get("name", str(x.get("id", ""))),
+                    "path": x.get("path", ""),
+                    "level": int(x.get("level", 0)),
+                })
+            total = result.get("total_count") if isinstance(result, dict) else None
+            if len(items) < self.CATEGORY_PAGE_SIZE or not new_rows:
+                break
+            if total is not None and len(out) >= int(total):
+                break
+        if out:
+            return out
         try:
             result = self.get("/categories")
             if isinstance(result, dict) and result.get("id") is not None:

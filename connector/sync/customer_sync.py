@@ -3,6 +3,10 @@ Customer Sync: Magento Order → ERPNext Customer + Address
 
 Called internally during order_sync.py — not scheduled independently.
 Creates or matches ERPNext Customer records from Magento order data.
+
+Every writer here takes `commit=True`. The order import passes commit=False so
+the buyer, addresses, Sales Order and order map row land in ONE transaction
+(committed by order_sync._process_order); other callers keep committing.
 """
 
 import frappe
@@ -47,10 +51,11 @@ def _get_territory():
     return _get_leaf_node("Territory", "territory", ("Kenya", "Rest Of The World"))
 
 
-def get_or_create_customer(magento_order):
+def get_or_create_customer(magento_order, commit=True):
     """
     Find or create an ERPNext Customer from a Magento order dict.
     Returns the ERPNext Customer name (document name).
+    `commit=False` leaves the commit to the caller (see module docstring).
     """
     email = (magento_order.get("customer_email") or "").strip().lower()
     magento_customer_id = magento_order.get("customer_id")
@@ -82,7 +87,8 @@ def get_or_create_customer(magento_order):
             current_id = frappe.db.get_value("Customer", existing, "magento_customer_id")
             if not current_id:
                 frappe.db.set_value("Customer", existing, "magento_customer_id", magento_customer_id)
-                frappe.db.commit()
+                if commit:
+                    frappe.db.commit()
         return existing
 
     # Create new customer
@@ -102,11 +108,12 @@ def get_or_create_customer(magento_order):
 
     customer.flags.ignore_permissions = True
     customer.insert()
-    frappe.db.commit()
+    if commit:
+        frappe.db.commit()
     return customer.name
 
 
-def _ensure_address_linked_to_customer(address_name, customer_name):
+def _ensure_address_linked_to_customer(address_name, customer_name, commit=True):
     """
     Add a Dynamic Link from `address_name` → `customer_name` if one does not
     already exist.  Called when the billing customer on the SO (e.g. "Web Sales")
@@ -125,7 +132,8 @@ def _ensure_address_linked_to_customer(address_name, customer_name):
             addr.append("links", {"link_doctype": "Customer", "link_name": customer_name})
             addr.flags.ignore_permissions = True
             addr.save()
-            frappe.db.commit()
+            if commit:
+                frappe.db.commit()
     except Exception as e:
         frappe.logger("connector").warning(
             f"_ensure_address_linked_to_customer: could not link address "
@@ -139,6 +147,7 @@ def get_or_create_address(
     also_link_to=None,
     always_create_new=False,
     address_kind="shipping",
+    commit=True,
 ):
     """
     Create or update a Magento-derived address for a customer.
@@ -155,6 +164,8 @@ def get_or_create_address(
 
     `address_kind` — either "shipping" or "billing". Controls which Magento
     address payload is used and which ERPNext address_type is assigned.
+
+    `commit` — False leaves the commit to the caller (see module docstring).
     """
     address_kind = (address_kind or "shipping").strip().lower()
     is_billing = address_kind == "billing"
@@ -195,18 +206,23 @@ def get_or_create_address(
     # address per order so each Sales Order has the correct shipping address
     # for that order; reusing/updating one address would show the wrong or
     # stale address when different buyers use the same SO customer.
+    # Match on address_type too: shipping and billing are looked up one after
+    # the other for the same customer, and matching any linked address made
+    # the billing call overwrite the shipping address it had just written.
+    existing_addr = None
     if not always_create_new:
-        existing_addr = frappe.db.get_value(
-            "Dynamic Link",
-            {
-                "link_doctype": "Customer",
-                "link_name": customer_name,
-                "parenttype": "Address",
-            },
-            "parent",
+        matches = frappe.get_all(
+            "Address",
+            filters=[
+                ["Dynamic Link", "link_doctype", "=", "Customer"],
+                ["Dynamic Link", "link_name", "=", customer_name],
+                ["address_type", "=", address_type],
+            ],
+            pluck="name",
+            order_by="modified desc",
+            limit=1,
         )
-    else:
-        existing_addr = None
+        existing_addr = matches[0] if matches else None
 
     if existing_addr:
         try:
@@ -221,16 +237,16 @@ def get_or_create_address(
                     "pincode": pincode,
                     "country": country,
                     "phone": phone,
-                    "address_type": address_type,
                 },
             )
-            frappe.db.commit()
+            if commit:
+                frappe.db.commit()
         except Exception as e:
             frappe.logger("connector").warning(
                 f"get_or_create_address: could not update existing address {existing_addr}: {e}"
             )
         if also_link_to and also_link_to != customer_name:
-            _ensure_address_linked_to_customer(existing_addr, also_link_to)
+            _ensure_address_linked_to_customer(existing_addr, also_link_to, commit=commit)
         return existing_addr
 
     # Create new address
@@ -261,7 +277,8 @@ def get_or_create_address(
         })
     addr.flags.ignore_permissions = True
     addr.insert()
-    frappe.db.commit()
+    if commit:
+        frappe.db.commit()
     return addr.name
 
 

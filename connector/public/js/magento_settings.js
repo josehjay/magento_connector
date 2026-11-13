@@ -3,102 +3,289 @@
 (function () {
     "use strict";
 
-    // ── Attribute Set helpers ──────────────────────────────────────────────
+    // ── Attribute Sets (Item Groups to Sync table) ─────────────────────────
+    //
+    // The "Magento Attribute Set" column is a Select whose options are loaded
+    // live from Magento. Picking a name fills the read-only Set ID, which is
+    // what product sync actually sends to Magento.
 
-    function get_attribute_set_name(items, attributeSetId) {
-        if (!items || !attributeSetId) return "";
-        var id = String(attributeSetId);
-        var found = items.find(function (s) { return String(s.attribute_set_id) === id; });
-        return found ? (found.attribute_set_name || "").toString().trim() : "";
+    var ITEM_GROUPS_FIELD = "magento_item_groups";
+    var ITEM_GROUPS_BASE_DESCRIPTION = __(
+        "Only Items in these groups sync to Magento (leave empty for all groups). " +
+        "Pick the Magento attribute set new products in each group are created with."
+    );
+
+    function find_set_by_id(items, id) {
+        if (!items || !id) return null;
+        return items.find(function (s) { return String(s.attribute_set_id) === String(id); }) || null;
     }
 
-    function sync_row_attribute_set_names(frm) {
-        var items = frm._magento_attribute_sets;
-        if (!items || !items.length || !frm.doc.magento_item_groups) return;
-        var changed = false;
-        frm.doc.magento_item_groups.forEach(function (row) {
-            if (!row.attribute_set_id) return;
-            var expected = get_attribute_set_name(items, row.attribute_set_id);
-            if (expected && row.attribute_set_name !== expected) {
-                row.attribute_set_name = expected;
-                changed = true;
+    function find_set_by_name(items, name) {
+        if (!items || !name) return null;
+        var wanted = String(name).trim().toLowerCase();
+        return items.find(function (s) {
+            return String(s.attribute_set_name || "").trim().toLowerCase() === wanted;
+        }) || null;
+    }
+
+    function set_item_groups_note(frm, html) {
+        frm.set_df_property(
+            ITEM_GROUPS_FIELD,
+            "description",
+            ITEM_GROUPS_BASE_DESCRIPTION + (html ? "<br>" + html : "")
+        );
+    }
+
+    function apply_attribute_set_options(frm) {
+        var field = frm.fields_dict[ITEM_GROUPS_FIELD];
+        if (!field || !field.grid) return;
+        var items = frm._magento_attribute_sets || [];
+        var names = items.map(function (s) { return s.attribute_set_name; });
+
+        // Keep names already saved on rows even if Magento no longer has them,
+        // so opening a row never silently blanks its value.
+        var missing = [];
+        (frm.doc[ITEM_GROUPS_FIELD] || []).forEach(function (row) {
+            var name = (row.attribute_set_name || "").trim();
+            if (name && names.indexOf(name) === -1) {
+                names.push(name);
+                missing.push(row.item_group + " → " + name);
             }
         });
-        if (changed) frm.refresh_field("magento_item_groups");
+
+        field.grid.update_docfield_property("attribute_set_name", "options", [""].concat(names).join("\n"));
+        field.grid.refresh();
+
+        if (missing.length) {
+            set_item_groups_note(frm,
+                "<span class='text-warning'>" +
+                frappe.utils.escape_html(__("Not found in Magento: {0}. Re-select these rows.", [missing.join(", ")])) +
+                "</span>");
+        } else {
+            set_item_groups_note(frm, "");
+        }
     }
 
-    function open_pick_attribute_set_dialog(frm) {
-        var do_open = function (items) {
-            if (!items || items.length === 0) {
-                frappe.show_alert({ message: __("No attribute sets returned from Magento."), indicator: "orange" });
+    // Fill in names for rows saved with only an ID, and IDs for rows saved
+    // with only a name (e.g. typed in before this field was a dropdown).
+    function reconcile_rows(frm) {
+        var items = frm._magento_attribute_sets;
+        if (!items || !items.length) return;
+        (frm.doc[ITEM_GROUPS_FIELD] || []).forEach(function (row) {
+            var by_id = find_set_by_id(items, row.attribute_set_id);
+            if (by_id && row.attribute_set_name !== by_id.attribute_set_name) {
+                frappe.model.set_value(row.doctype, row.name, "attribute_set_name", by_id.attribute_set_name);
                 return;
             }
-            var rows = (frm.doc.magento_item_groups || []).map(function (row, idx) {
-                var label = (row.item_group || __("(no Item Group)")) + " — " + __("Row") + " " + (idx + 1);
-                return { label: label, value: idx };
-            });
-            if (rows.length === 0) {
-                frappe.msgprint({ message: __("Add at least one row in Item Groups to Sync first."), indicator: "orange" });
-                return;
+            if (!by_id && row.attribute_set_name) {
+                var by_name = find_set_by_name(items, row.attribute_set_name);
+                if (by_name) {
+                    frappe.model.set_value(row.doctype, row.name, "attribute_set_name", by_name.attribute_set_name);
+                    frappe.model.set_value(row.doctype, row.name, "attribute_set_id", by_name.attribute_set_id);
+                }
             }
-            var attr_options = "\n" + items.map(function (s) {
-                return s.attribute_set_id + "|" + (s.attribute_set_name || s.attribute_set_id);
-            }).join("\n");
-            var d = new frappe.ui.Dialog({
-                title: __("Pick Attribute Set"),
-                fields: [
-                    {
-                        fieldtype: "Select",
-                        fieldname: "row_index",
-                        label: __("Apply to row"),
-                        options: rows.map(function (r) { return r.label; }).join("\n"),
-                        reqd: 1,
-                    },
-                    {
-                        fieldtype: "Select",
-                        fieldname: "attribute_set",
-                        label: __("Magento Attribute Set"),
-                        options: attr_options,
-                        reqd: 1,
-                    },
-                ],
-                primary_action_label: __("Apply"),
-                primary_action: function (values) {
-                    var found_row = rows.find(function (r) { return r.label === values.row_index; });
-                    if (!found_row) return;
-                    var idx = found_row.value;
-                    var chosen_id = String(values.attribute_set || "").split("|")[0];
-                    var chosen = items.find(function (s) {
-                        return String(s.attribute_set_id) === chosen_id;
-                    });
-                    if (chosen && frm.doc.magento_item_groups[idx]) {
-                        var row = frm.doc.magento_item_groups[idx];
-                        frappe.model.set_value(row.doctype, row.name, "attribute_set_id", chosen.attribute_set_id);
-                        frappe.model.set_value(row.doctype, row.name, "attribute_set_name", chosen.attribute_set_name || "");
-                        frm.refresh_field("magento_item_groups");
-                        frappe.show_alert({ message: __("Attribute set applied — save the form to persist."), indicator: "green" });
-                    }
-                    d.hide();
-                },
-            });
-            d.show();
-        };
+        });
+    }
 
-        if (frm._magento_attribute_sets && frm._magento_attribute_sets.length) {
-            do_open(frm._magento_attribute_sets);
-            return;
-        }
+    function load_attribute_sets(frm, opts) {
+        opts = opts || {};
+        if (!frm.fields_dict[ITEM_GROUPS_FIELD]) return;
+        if (frm.is_new && frm.is_new()) return;
+
+        set_item_groups_note(frm, "<span class='text-muted'>" + __("Loading attribute sets from Magento…") + "</span>");
         frappe.call({
             method: "connector.api.magento_options.get_magento_attribute_sets",
-            freeze: true,
+            freeze: !!opts.interactive,
             freeze_message: __("Fetching attribute sets from Magento…"),
             callback: function (r) {
-                if (r.exc || !r.message || !r.message.ok) {
-                    frappe.show_alert({ message: __("Could not load attribute sets."), indicator: "orange" });
+                var res = r.message || {};
+                if (r.exc || !res.ok) {
+                    var err = res.error || __("Could not load attribute sets from Magento.");
+                    set_item_groups_note(frm,
+                        "<span class='text-danger'>" + frappe.utils.escape_html(err) + "</span>");
+                    if (opts.interactive) {
+                        frappe.msgprint({ title: __("Magento Attribute Sets"), message: frappe.utils.escape_html(err), indicator: "red" });
+                    }
                     return;
                 }
-                frm._magento_attribute_sets = r.message.items || [];
-                do_open(frm._magento_attribute_sets);
+                frm._magento_attribute_sets = res.items || [];
+                apply_attribute_set_options(frm);
+                reconcile_rows(frm);
+                if (opts.interactive) {
+                    frappe.show_alert({
+                        message: __("{0} attribute set(s) loaded from Magento.", [frm._magento_attribute_sets.length]),
+                        indicator: "green",
+                    });
+                }
+            },
+        });
+    }
+
+    frappe.ui.form.on("Magento Item Group", {
+        attribute_set_name: function (frm, cdt, cdn) {
+            var row = locals[cdt][cdn];
+            var chosen = find_set_by_name(frm._magento_attribute_sets, row.attribute_set_name);
+            var id = chosen ? chosen.attribute_set_id : null;
+            if (!row.attribute_set_name) id = null;
+            if (chosen || !row.attribute_set_name) {
+                frappe.model.set_value(cdt, cdn, "attribute_set_id", id);
+            }
+        },
+        magento_item_groups_add: function (frm) {
+            if (!frm._magento_attribute_sets) load_attribute_sets(frm);
+        },
+        sync_mode: function (frm, cdt, cdn) {
+            var row = locals[cdt][cdn];
+            // depends_on of "Selected Items" reads this table; re-evaluate it.
+            frm.refresh_field(SELECTED_ITEMS_FIELD);
+            frm.layout && frm.layout.refresh_dependency && frm.layout.refresh_dependency();
+            if (row.sync_mode === SYNC_MODE_SELECTED) {
+                frappe.show_alert({
+                    message: __("Only hand-picked items from {0} will sync. Use Products → Select Items for Group to pick them.",
+                        [frappe.utils.escape_html(row.item_group || __("this group"))]),
+                    indicator: "blue",
+                }, 8);
+            }
+        },
+    });
+
+    // ── Selected items (groups set to "Selected Items Only") ──────────────
+
+    var SELECTED_ITEMS_FIELD = "magento_selected_items";
+    var SYNC_MODE_SELECTED = "Selected Items Only";
+
+    function selected_only_groups(frm) {
+        var groups = [];
+        (frm.doc[ITEM_GROUPS_FIELD] || []).forEach(function (row) {
+            if (row.sync_mode === SYNC_MODE_SELECTED && row.item_group && groups.indexOf(row.item_group) === -1) {
+                groups.push(row.item_group);
+            }
+        });
+        return groups;
+    }
+
+    function add_selected_items(frm, item_codes) {
+        var existing = {};
+        (frm.doc[SELECTED_ITEMS_FIELD] || []).forEach(function (row) {
+            if (row.item_code) existing[row.item_code] = true;
+        });
+        var fresh = [];
+        (item_codes || []).forEach(function (code) {
+            if (code && !existing[code]) {
+                existing[code] = true;
+                fresh.push(code);
+            }
+        });
+        if (!fresh.length) {
+            frappe.show_alert({ message: __("All chosen items are already selected."), indicator: "orange" });
+            return;
+        }
+
+        // add_child does not run fetch_from, so read name/group up front.
+        frappe.call({
+            method: "frappe.client.get_list",
+            args: {
+                doctype: "Item",
+                filters: [["name", "in", fresh]],
+                fields: ["name", "item_name", "item_group"],
+                limit_page_length: fresh.length,
+            },
+            callback: function (r) {
+                var info = {};
+                (r.message || []).forEach(function (it) { info[it.name] = it; });
+                fresh.forEach(function (code) {
+                    var it = info[code] || {};
+                    frm.add_child(SELECTED_ITEMS_FIELD, {
+                        item_code: code,
+                        item_name: it.item_name || "",
+                        item_group: it.item_group || "",
+                    });
+                });
+                frm.refresh_field(SELECTED_ITEMS_FIELD);
+                frm.dirty();
+                frappe.show_alert({
+                    message: __("{0} item(s) added — save to apply.", [fresh.length]),
+                    indicator: "green",
+                });
+            },
+        });
+    }
+
+    function open_item_picker(frm, group) {
+        var picker = new frappe.ui.form.MultiSelectDialog({
+            doctype: "Item",
+            target: frm,
+            setters: { item_group: group, item_name: null },
+            get_query: function () {
+                return { filters: { item_group: group, disabled: 0 } };
+            },
+            primary_action_label: __("Add to Selected Items"),
+            action: function (selections) {
+                add_selected_items(frm, selections);
+                picker.dialog.hide();
+            },
+        });
+    }
+
+    function select_items_for_group(frm) {
+        var groups = selected_only_groups(frm);
+        if (!groups.length) {
+            frappe.msgprint({
+                title: __("No Selected-Only Groups"),
+                message: __("Set a row's Sync Mode to \"Selected Items Only\" in Item Groups to Sync first."),
+                indicator: "orange",
+            });
+            return;
+        }
+        if (groups.length === 1) {
+            open_item_picker(frm, groups[0]);
+            return;
+        }
+        frappe.prompt(
+            [{
+                fieldname: "item_group",
+                fieldtype: "Select",
+                label: __("Item Group"),
+                options: groups.join("\n"),
+                default: groups[0],
+                reqd: 1,
+            }],
+            function (values) { open_item_picker(frm, values.item_group); },
+            __("Select Items for Group"),
+            __("Next")
+        );
+    }
+
+    // ── Push endpoint security banner ─────────────────────────────────────
+
+    function show_push_security_status(frm) {
+        if (frm.is_new && frm.is_new()) return;
+        frappe.call({
+            doc: frm.doc,
+            method: "get_push_security_status",
+            callback: function (r) {
+                var s = r.message;
+                if (!s || s.secure) {
+                    if (frm._magento_security_alert) {
+                        frm.dashboard.clear_headline();
+                        frm._magento_security_alert = false;
+                    }
+                    return;
+                }
+                var problems = [];
+                if (!s.push_endpoint_role) {
+                    problems.push(__("no role is required to call them, so any System User can"));
+                }
+                if (!s.signing_enforced) {
+                    problems.push(__("unsigned requests are accepted"));
+                }
+                var esc = frappe.utils.escape_html;
+                var html = esc(__("Magento push endpoints (orders, status, images) are not locked down: {0}.",
+                        [problems.join(__("; "))])) +
+                    " " + esc(__("Set a push endpoint role and turn on signed push verification (enforced) in")) +
+                    ' <a href="/app/connector-settings">' + esc(__("Connector Settings")) + "</a>.";
+                frm.dashboard.set_headline_alert(html, "orange");
+                frm._magento_security_alert = true;
             },
         });
     }
@@ -685,20 +872,26 @@
     // ── Main form handler ─────────────────────────────────────────────────
 
     frappe.ui.form.on("Magento Settings", {
+        setup: function (frm) {
+            // Bins exist only on leaf warehouses: a group warehouse here would
+            // make inventory sync push 0 for every product.
+            frm.set_query("stock_warehouses", function () {
+                return { filters: { is_group: 0 } };
+            });
+        },
+
         refresh: function (frm) {
 
-            // Pre-load attribute sets so names are backfilled immediately
-            if (frm.fields_dict.magento_item_groups) {
-                frappe.call({
-                    method: "connector.api.magento_options.get_magento_attribute_sets",
-                    callback: function (r) {
-                        if (!r.exc && r.message && r.message.ok && r.message.items && r.message.items.length) {
-                            frm._magento_attribute_sets = r.message.items;
-                            sync_row_attribute_set_names(frm);
-                        }
-                    },
-                });
+            // Load attribute sets into the Item Groups table dropdown (once per
+            // form load; "Reload Attribute Sets" forces a refetch).
+            if (frm._magento_attribute_sets) {
+                apply_attribute_set_options(frm);
+            } else if (!frm._magento_attribute_sets_requested) {
+                frm._magento_attribute_sets_requested = true;
+                load_attribute_sets(frm);
             }
+
+            show_push_security_status(frm);
 
             // ── Connection group ─────────────────────────────────────────
             frm.add_custom_button(__("Test Connection"), function () {
@@ -743,8 +936,12 @@
             }, __("Connection"));
 
             // ── Products group ───────────────────────────────────────────
-            frm.add_custom_button(__("Pick Attribute Set"), function () {
-                open_pick_attribute_set_dialog(frm);
+            frm.add_custom_button(__("Reload Attribute Sets"), function () {
+                load_attribute_sets(frm, { interactive: true });
+            }, __("Products"));
+
+            frm.add_custom_button(__("Select Items for Group"), function () {
+                select_items_for_group(frm);
             }, __("Products"));
 
             frm.add_custom_button(__("Sync All Products Now"), function () {

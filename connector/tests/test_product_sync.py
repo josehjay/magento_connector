@@ -201,10 +201,11 @@ class TestProductSync(unittest.TestCase):
         self.assertEqual(payload["custom_attributes"], [{"attribute_code": "size", "value": "A4"}])
         self.assertNotIn("attribute_set_id", payload)
 
+    @patch("connector.sync.product_sync._is_sync_enabled", return_value=False)
     @patch("connector.sync.product_sync.frappe")
-    def test_skips_when_sync_disabled(self, mock_frappe):
+    def test_skips_when_sync_disabled(self, mock_frappe, _mock_enabled):
         """push_item_to_magento should exit early when sync is disabled."""
-        mock_frappe.db.get_single_value.return_value = False
+        # The switch now lives in connector.utils, so patch the module alias.
 
         from connector.sync.product_sync import push_item_to_magento
         push_item_to_magento("TEST-SKU-001")

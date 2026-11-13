@@ -35,11 +35,12 @@ SAMPLE_ORDER_REGISTERED = {
 
 class TestCustomerSync(unittest.TestCase):
 
+    @patch("connector.sync.customer_sync._get_territory", return_value="Kenya")
+    @patch("connector.sync.customer_sync._get_customer_group", return_value="Individual")
     @patch("connector.sync.customer_sync.frappe")
-    def test_creates_guest_customer_by_email(self, mock_frappe):
+    def test_creates_guest_customer_by_email(self, mock_frappe, _group, _territory):
         """Guest orders should create a customer using email as identifier."""
         mock_frappe.db.get_value.return_value = None
-        mock_frappe.db.get_single_value.return_value = "All Customer Groups"
 
         mock_customer = MagicMock()
         mock_customer.name = "Jane Guest"
@@ -55,7 +56,7 @@ class TestCustomerSync(unittest.TestCase):
     def test_returns_existing_customer_by_magento_id(self, mock_frappe):
         """Registered customers should be matched by magento_customer_id first."""
         def mock_get_value(doctype, filters, fieldname):
-            if doctype == "Customer" and filters.get("magento_customer_id") == 99:
+            if doctype == "Customer" and isinstance(filters, dict) and filters.get("magento_customer_id") == 99:
                 return "Bob Registered"
             return None
 
@@ -91,6 +92,7 @@ class TestCustomerSync(unittest.TestCase):
         }
         mock_frappe.db.get_value.return_value = None
         mock_frappe.db.get_single_value.return_value = None
+        mock_frappe.get_all.return_value = []
 
         mock_addr = MagicMock()
         mock_addr.name = "Jane Guest-Shipping"

@@ -18,22 +18,15 @@ is confirmed.  The ERPNext connector never auto-completes.
 import frappe
 from connector.api.magento_client import MagentoClient, MagentoAPIError
 from connector.connector.doctype.magento_sync_log.magento_sync_log import create_log
+from connector.utils import is_magento_enabled, is_magento_sync_enabled
 
 
 # ── Guards ─────────────────────────────────────────────────────────────────
 
 
-def _is_magento_enabled():
-    try:
-        return bool(frappe.db.get_single_value("Connector Settings", "enable_magento_integration"))
-    except Exception:
-        return True
-
-
-def _is_sync_enabled():
-    if not _is_magento_enabled():
-        return False
-    return bool(frappe.db.get_single_value("Magento Settings", "sync_enabled"))
+# Kept as module-level names: tests patch them.
+_is_magento_enabled = is_magento_enabled
+_is_sync_enabled = is_magento_sync_enabled
 
 
 # ── Sales Order hooks ──────────────────────────────────────────────────────
@@ -158,7 +151,7 @@ def on_delivery_note_cancel(doc, method):
 
     for so_name, magento_order_id in _magento_orders_for_dn(doc):
         frappe.enqueue(
-            "connector.sync.status_sync._push_processing_comment",
+            "connector.sync.status_sync._push_order_comment",
             queue="short",
             timeout=120,
             job_id=f"magento_dn_cancel_{doc.name}_{magento_order_id}",
@@ -212,7 +205,7 @@ def on_sales_invoice_cancel(doc, method):
 
     for so_name, magento_order_id in _magento_orders_for_si(doc):
         frappe.enqueue(
-            "connector.sync.status_sync._push_processing_comment",
+            "connector.sync.status_sync._push_order_comment",
             queue="short",
             timeout=120,
             job_id=f"magento_si_cancel_{doc.name}_{magento_order_id}",
@@ -315,6 +308,35 @@ def _push_processing_comment(sales_order, magento_order_id, comment):
 
 # Kept for backwards compatibility
 push_order_status_to_magento = _push_processing_comment
+
+
+def _push_order_comment(sales_order, magento_order_id, comment):
+    """
+    Informational comment only — used for Delivery Note / Sales Invoice
+    cancellations. Unlike _push_processing_comment it never requests the
+    "processing" status, which would also try to create a Magento invoice
+    (ensure_invoice_for_processing) — the opposite of a cancellation.
+    """
+    try:
+        MagentoClient().add_order_comment(magento_order_id, comment)
+        create_log(
+            operation="Status Sync",
+            status="Success",
+            doctype_name="Sales Order",
+            document_name=sales_order,
+            magento_id=str(magento_order_id),
+            response_payload={"comment": comment[:200]},
+        )
+    except Exception as exc:
+        frappe.log_error(frappe.get_traceback(), f"Magento Order Comment Error: {sales_order}")
+        create_log(
+            operation="Status Sync",
+            status="Failed",
+            doctype_name="Sales Order",
+            document_name=sales_order,
+            magento_id=str(magento_order_id),
+            error_message=str(exc),
+        )
 
 
 def cancel_magento_order(sales_order, magento_order_id):

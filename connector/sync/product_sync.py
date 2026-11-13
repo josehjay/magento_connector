@@ -33,6 +33,7 @@ import frappe
 from frappe.utils.background_jobs import is_job_enqueued
 from connector.api.magento_client import MagentoClient, MagentoAPIError
 from connector.security.permissions import require_item_write
+from connector.utils import is_magento_enabled, is_magento_sync_enabled
 from connector.connector.doctype.magento_product_map.magento_product_map import (
     get_magento_product_id,
     upsert_map,
@@ -109,29 +110,124 @@ def _has_magento_map(item_code):
     return bool(frappe.db.exists("Magento Product Map", item_code))
 
 
-def _is_magento_enabled():
-    try:
-        return bool(frappe.db.get_single_value("Connector Settings", "enable_magento_integration"))
-    except Exception:
+# Kept as module-level names: tests patch them by name.
+_is_magento_enabled = is_magento_enabled
+_is_sync_enabled = is_magento_sync_enabled
+
+
+# "Item Groups to Sync" row → sync_mode values (Magento Item Group doctype).
+SYNC_MODE_ALL = "All Items"
+SYNC_MODE_SELECTED = "Selected Items Only"
+
+
+class MagentoSyncScope:
+    """
+    Snapshot of which Items may be pushed to Magento, read once from Magento
+    Settings and reused for a whole call path (a hook, a batch, a scan) so the
+    single doc isn't re-fetched per item.
+
+    Rules (sync_to_magento / disabled are checked separately by callers):
+      - empty "Item Groups to Sync" table → every group is allowed;
+      - group row with sync_mode "All Items" → every item in that group;
+      - group row with "Selected Items Only" → only items listed in the
+        "Selected Items" table. Needed because sync_to_magento defaults to 1
+        on every Item, so it cannot be used to curate groups full of
+        duplicates.
+    """
+
+    def __init__(self, settings=None):
+        settings = settings or frappe.get_single("Magento Settings")
+        # getattr (not .get) so MagicMock settings in tests behave like docs.
+        group_rows = getattr(settings, "magento_item_groups", None) or []
+        self.allowed_groups = set()
+        self.selected_only_groups = set()
+        for row in group_rows:
+            group = getattr(row, "item_group", None)
+            if not group:
+                continue
+            self.allowed_groups.add(group)
+            if getattr(row, "sync_mode", None) == SYNC_MODE_SELECTED:
+                self.selected_only_groups.add(group)
+
+        self.selected_items = set()
+        if self.selected_only_groups:
+            for row in getattr(settings, "magento_selected_items", None) or []:
+                code = getattr(row, "item_code", None)
+                if isinstance(code, str) and code:
+                    self.selected_items.add(code)
+
+    @property
+    def all_mode_groups(self):
+        return self.allowed_groups - self.selected_only_groups
+
+    def allows(self, item_group, item_code):
+        if not self.allowed_groups:
+            return True
+        if item_group not in self.allowed_groups:
+            return False
+        if item_group in self.selected_only_groups:
+            return item_code in self.selected_items
         return True
 
+    def item_query(self, base_filters):
+        """
+        Return (filters, or_filters) for frappe.get_all("Item", ...) that
+        select only eligible Items, or None when nothing can be eligible.
 
-def _is_sync_enabled():
-    if not _is_magento_enabled():
-        return False
-    return bool(frappe.db.get_single_value("Magento Settings", "sync_enabled"))
+        The item_group IN (...) filter keeps every allowed group; when some
+        groups are "Selected Items Only", or_filters then narrows to
+        (item in an "All Items" group) OR (item is hand-picked). A picked item
+        must still sit in an allowed group, so one moved to a group that is
+        not in the table stops syncing.
+        """
+        filters = dict(base_filters)
+        if not self.allowed_groups:
+            return filters, None
+        filters["item_group"] = ["in", sorted(self.allowed_groups)]
+        if not self.selected_only_groups:
+            return filters, None
+
+        or_filters = []
+        if self.all_mode_groups:
+            or_filters.append(["item_group", "in", sorted(self.all_mode_groups)])
+        if self.selected_items:
+            or_filters.append(["item_code", "in", sorted(self.selected_items)])
+        if not or_filters:
+            return None
+        return filters, or_filters
+
+
+def get_sync_scope():
+    """Fresh MagentoSyncScope (one Magento Settings read)."""
+    return MagentoSyncScope()
+
+
+def is_item_eligible_for_magento(item_group, item_code, scope=None):
+    """
+    Single answer to "may this Item's group/selection be pushed to Magento?".
+    Pass a scope from get_sync_scope() when checking many items.
+    """
+    return (scope or get_sync_scope()).allows(item_group, item_code)
+
+
+def get_eligible_item_rows(base_filters, fields, scope=None, **kwargs):
+    """frappe.get_all("Item") restricted to items eligible for Magento."""
+    query = (scope or get_sync_scope()).item_query(base_filters)
+    if query is None:
+        return []
+    filters, or_filters = query
+    if or_filters:
+        kwargs["or_filters"] = or_filters
+    return frappe.get_all("Item", filters=filters, fields=fields, **kwargs)
 
 
 def _get_allowed_item_groups():
-    settings = frappe.get_single("Magento Settings")
-    return {row.item_group for row in (settings.magento_item_groups or [])}
+    return get_sync_scope().allowed_groups
 
 
-def _is_item_group_allowed(item_group):
-    allowed = _get_allowed_item_groups()
-    if not allowed:
-        return True
-    return item_group in allowed
+def _is_item_group_allowed(item_group, item_code=None):
+    """Back-compat wrapper; prefer is_item_eligible_for_magento()."""
+    return is_item_eligible_for_magento(item_group, item_code)
 
 
 def _get_item_price(item_code, price_list):
@@ -346,7 +442,8 @@ def on_item_save(doc, method):
     - Disabled Item with an existing Magento map → enqueue removal of the
       Magento product + map (same as deleting the Item).
     - Deselected sync_to_magento → enqueue removal from Magento and map.
-    - Enabled sync_to_magento + allowed group + not disabled → enqueue push.
+    - Enabled sync_to_magento + eligible (allowed group, and hand-picked when
+      the group is "Selected Items Only") + not disabled → enqueue push.
 
     The actual Magento API calls run in a background worker (deduplicated
     by item_code) AFTER the current ERPNext transaction commits. This keeps
@@ -371,7 +468,10 @@ def on_item_save(doc, method):
             _enqueue_product_sync(item_code, mode="remove")
         return
 
-    if not _is_item_group_allowed(doc.get("item_group")):
+    if not is_item_eligible_for_magento(doc.get("item_group"), item_code):
+        # Group not in "Item Groups to Sync", or a "Selected Items Only" group
+        # and this item was not picked. An existing Magento product is left
+        # alone on purpose (it may have been curated in Magento).
         return
 
     _enqueue_product_sync(item_code, mode="push")
@@ -451,7 +551,12 @@ def on_item_price_change(doc, method):
     if not doc.get("selling"):
         return
 
-    if frappe.db.get_value("Item", item_code, "disabled"):
+    item = frappe.db.get_value(
+        "Item", item_code, ["disabled", "sync_to_magento", "item_group"], as_dict=True
+    )
+    if not item or item.get("disabled") or not item.get("sync_to_magento"):
+        return
+    if not is_item_eligible_for_magento(item.get("item_group"), item_code):
         return
 
     _enqueue_product_sync(item_code, mode="push")
@@ -716,7 +821,7 @@ def _push_item_to_magento(item_code):
     if not doc.get("sync_to_magento"):
         return
 
-    if not _is_item_group_allowed(doc.item_group):
+    if not is_item_eligible_for_magento(doc.item_group, item_code):
         return
 
     payload = _build_product_payload(doc)
@@ -838,7 +943,11 @@ def _pull_magento_data_for_item(client, item_code):
         result["error"] = "no_media_in_magento"
         return result
 
-    base_image_url = _extract_base_image_url(media_entries, magento_url)
+    # Real media base (CDN / cloud storage) from Magento; falls back to
+    # {magento_url}/media/ inside the helper when None.
+    base_image_url = _extract_base_image_url(
+        media_entries, magento_url, client.get_media_base_url()
+    )
     if not base_image_url:
         result["error"] = "no_base_image_type"
         return result
@@ -1114,7 +1223,8 @@ def _enqueue_full_sync_chunk(chunk_no=0):
 def _get_items_needing_full_sync():
     """
     Return sorted list of item codes that still need a bulk push, restricted
-    to the Item Groups configured in "Item Groups to Sync" (Magento Settings).
+    to the Item Groups configured in "Item Groups to Sync" (Magento Settings)
+    and, for "Selected Items Only" groups, to the hand-picked items.
 
     An item needs syncing if:
       - it has no Magento Product Map row yet (never synced), or
@@ -1130,15 +1240,9 @@ def _get_items_needing_full_sync():
     this tool complements the rebuild tool instead of re-pushing everything
     it just restored.
     """
-    filters = {"sync_to_magento": 1, "disabled": 0}
-    allowed_groups = _get_allowed_item_groups()
-    if allowed_groups:
-        filters["item_group"] = ["in", list(allowed_groups)]
-
-    items = frappe.get_all(
-        "Item",
-        filters=filters,
-        fields=["item_code", "modified", "magento_last_synced_on", "has_variants", "variant_of"],
+    items = get_eligible_item_rows(
+        {"sync_to_magento": 1, "disabled": 0},
+        ["item_code", "modified", "magento_last_synced_on", "has_variants", "variant_of"],
     )
     if not items:
         return []
@@ -1331,11 +1435,14 @@ def retry_failed_product_sync():
     # within an allowed Item Group — a group removed from "Item Groups to Sync"
     # after an item failed should stop being retried, not loop forever.
     # Disabled items are handled by cleanup_disabled_items_from_magento().
-    valid_filters = {"item_code": ["in", due], "sync_to_magento": 1, "disabled": 0}
-    allowed_groups = _get_allowed_item_groups()
-    if allowed_groups:
-        valid_filters["item_group"] = ["in", list(allowed_groups)]
-    valid = set(frappe.get_all("Item", filters=valid_filters, pluck="item_code"))
+    # "Selected Items Only" groups likewise drop items that were un-picked.
+    valid = {
+        row["item_code"]
+        for row in get_eligible_item_rows(
+            {"item_code": ["in", due], "sync_to_magento": 1, "disabled": 0},
+            ["item_code"],
+        )
+    }
     due = [c for c in due if c in valid]
 
     if not due:

@@ -19,14 +19,15 @@ from connector.connector.doctype.remote_site_product_map.remote_site_product_map
 from connector.connector.doctype.magento_sync_log.magento_sync_log import (
     create_log,
 )
+from connector.utils import is_erpnext_site_sync_enabled
 
 
-def _is_erpnext_site_sync_enabled():
-    """Return True if ERPNext site sync is enabled in Connector Settings."""
-    try:
-        return bool(frappe.db.get_single_value("Connector Settings", "enable_erpnext_site_sync"))
-    except Exception:
-        return False
+# Failed remote pushes are retried by the catch-up job at most this often.
+FAILED_RETRY_MINUTES = 60
+
+
+# Kept as a module-level name: tests patch it.
+_is_erpnext_site_sync_enabled = is_erpnext_site_sync_enabled
 
 
 def _get_enabled_sites():
@@ -78,17 +79,13 @@ def _build_item_payload(doc, price_list=None):
 
     if doc.get("brand"):
         payload["brand"] = doc.brand
-    if doc.get("barcode"):
-        barcodes = frappe.get_all(
-            "Item Barcode",
-            filters={"parent": doc.item_code},
-            fields=["barcode", "barcode_type"],
-        )
-        if barcodes:
-            payload["barcodes"] = [
-                {"barcode": b["barcode"], "barcode_type": b.get("barcode_type", "")}
-                for b in barcodes
-            ]
+    # Item has no "barcode" field — barcodes live in the "barcodes" child table.
+    barcodes = [b for b in (doc.get("barcodes") or []) if b.get("barcode")]
+    if barcodes:
+        payload["barcodes"] = [
+            {"barcode": b.get("barcode"), "barcode_type": b.get("barcode_type") or ""}
+            for b in barcodes
+        ]
 
     return payload
 
@@ -214,6 +211,8 @@ def push_item_to_site(item_code, remote_site):
 
         upsert_map(remote_site, item_code, remote_item_code, "Synced")
 
+        _push_item_price(client, remote_site, item_code, remote_item_code, price_list)
+
         create_log(
             operation="ERPNext Product Push",
             status="Success",
@@ -250,6 +249,80 @@ def push_item_to_site(item_code, remote_site):
         )
 
 
+def _push_item_price(client, remote_site, item_code, remote_item_code, price_list):
+    """
+    Upsert the remote selling Item Price after a successful item push.
+
+    ERPNext only reads Item.standard_rate when the Item is first created, so
+    without this the remote price never changes after the first push. A
+    price failure is logged but never marks the item push as failed. The
+    remote site must have a Price List with the same name as site.price_list.
+    """
+    if not price_list:
+        return None
+    rate = _get_item_price(item_code, price_list)
+    if rate is None:
+        return None
+    try:
+        return client.upsert_item_price(remote_item_code, price_list, rate)
+    except Exception as e:
+        create_log(
+            operation="ERPNext Product Push",
+            status="Failed",
+            doctype_name="Item",
+            document_name=item_code,
+            magento_id=f"{remote_site}:{remote_item_code}",
+            error_message=(
+                f"Item pushed, but updating Item Price on '{remote_site}' "
+                f"(price list '{price_list}', rate {rate}) failed: {e}. "
+                "Check that the remote site has a Price List with the same name."
+            ),
+            request_payload={"item_code": remote_item_code, "price_list": price_list, "price_list_rate": rate},
+        )
+        return None
+
+
+def on_item_price_change(doc, method=None):
+    """
+    Item Price hook: a price change does not touch Item.modified, so the
+    catch-up job would never notice it. Re-push the item to every enabled
+    site whose price_list is this Item Price's list. Best-effort — never
+    blocks the Item Price save.
+    """
+    try:
+        if not _is_erpnext_site_sync_enabled():
+            return
+        if not doc.get("selling") or not doc.get("item_code") or not doc.get("price_list"):
+            return
+        item_code = doc.get("item_code")
+        if not frappe.db.get_value("Item", item_code, "sync_to_erpnext_sites"):
+            return
+        sites = frappe.get_all(
+            "Remote ERPNext Site",
+            filters={"enable_sync": 1, "price_list": doc.get("price_list")},
+            pluck="name",
+        )
+        for site_name in sites:
+            frappe.enqueue(
+                "connector.sync.erpnext_product_sync.push_item_to_site",
+                queue="default",
+                timeout=120,
+                job_id=f"erpnext_push_{site_name}_{item_code}",
+                deduplicate=True,
+                enqueue_after_commit=True,
+                item_code=item_code,
+                remote_site=site_name,
+            )
+    except Exception:
+        try:
+            frappe.log_error(
+                frappe.get_traceback(),
+                "Connector Hook Failed: Item Price.erpnext_product_sync.on_item_price_change",
+            )
+        except Exception:
+            pass
+
+
 def full_erpnext_product_sync():
     """
     Hourly catch-up: sync all Items flagged for ERPNext site sync that are
@@ -275,15 +348,34 @@ def full_erpnext_product_sync():
             fields=["item_code", "modified"],
         )
 
+        # One query for the whole site instead of one per item.
+        map_rows = {
+            row["item_code"]: row
+            for row in frappe.get_all(
+                "Remote Site Product Map",
+                filters={"remote_site": site_name},
+                fields=["item_code", "last_synced_on", "sync_status"],
+            )
+        }
+
+        retry_failed_before = frappe.utils.add_to_date(
+            frappe.utils.now_datetime(), minutes=-FAILED_RETRY_MINUTES
+        )
         queued = 0
         for item in items:
-            last_synced = frappe.db.get_value(
-                "Remote Site Product Map",
-                {"remote_site": site_name, "item_code": item["item_code"]},
-                "last_synced_on",
+            map_row = map_rows.get(item["item_code"]) or {}
+            last_synced = map_row.get("last_synced_on")
+            # upsert_map stamps last_synced_on on failures too, so Failed rows
+            # must be re-queued explicitly or they are never retried (at most
+            # once per FAILED_RETRY_MINUTES so a permanent error can't flood
+            # the remote site every 10 minutes).
+            needs_push = (
+                not last_synced
+                or (map_row.get("sync_status") == "Failed" and last_synced < retry_failed_before)
+                or (item["modified"] and last_synced < item["modified"])
             )
 
-            if not last_synced or (item["modified"] and last_synced < item["modified"]):
+            if needs_push:
                 frappe.enqueue(
                     "connector.sync.erpnext_product_sync.push_item_to_site",
                     queue="long",

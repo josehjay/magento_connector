@@ -96,7 +96,7 @@ class TestOrderSync(unittest.TestCase):
         from connector.sync.order_sync import _process_order
         result = _process_order(SAMPLE_MAGENTO_ORDER, MagicMock())
 
-        self.assertEqual(result, "imported")
+        self.assertEqual(result["status"], "imported")
         mock_so.insert.assert_called_once()
         mock_so.submit.assert_not_called()
 
@@ -110,7 +110,7 @@ class TestOrderSync(unittest.TestCase):
         from connector.sync.order_sync import _process_order
         result = _process_order(SAMPLE_MAGENTO_ORDER, MagicMock())
 
-        self.assertEqual(result, "updated")
+        self.assertEqual(result["status"], "updated")
         mock_status_sync.assert_called_once()
 
     @patch("connector.sync.order_sync.frappe")
@@ -124,7 +124,7 @@ class TestOrderSync(unittest.TestCase):
         from connector.sync.order_sync import _process_order
         result = _process_order(cancelled_order, MagicMock())
 
-        self.assertEqual(result, "skipped")
+        self.assertEqual(result["status"], "skipped")
 
     def test_build_order_items_skips_missing_sku(self):
         """Items with SKUs not in ERPNext should be silently skipped."""

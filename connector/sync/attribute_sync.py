@@ -28,6 +28,7 @@ from connector.connector.doctype.magento_attribute_mapping.magento_attribute_map
     upsert_map,
 )
 from connector.connector.doctype.magento_sync_log.magento_sync_log import create_log
+from connector.utils import is_magento_enabled, is_magento_sync_enabled
 
 # Magento EAV attribute codes: must start with a letter, only [a-z0-9_], max 30 chars.
 ATTRIBUTE_CODE_MAX_LEN = 30
@@ -35,17 +36,9 @@ _INVALID_CODE_CHARS = re.compile(r"[^a-z0-9_]+")
 _REPEAT_UNDERSCORES = re.compile(r"_+")
 
 
-def _is_magento_enabled():
-    try:
-        return bool(frappe.db.get_single_value("Connector Settings", "enable_magento_integration"))
-    except Exception:
-        return True
-
-
-def _is_sync_enabled():
-    if not _is_magento_enabled():
-        return False
-    return bool(frappe.db.get_single_value("Magento Settings", "sync_enabled"))
+# Kept as module-level names: tests patch them.
+_is_magento_enabled = is_magento_enabled
+_is_sync_enabled = is_magento_sync_enabled
 
 
 def _slugify_attribute_code(item_attribute):
