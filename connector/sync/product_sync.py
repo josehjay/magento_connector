@@ -792,9 +792,60 @@ def push_item_to_magento(item_code):
     return _push_item_to_magento(item_code)
 
 
+# A push normally takes seconds; the lock expires on its own if a worker dies
+# mid-push. A second caller waits up to PUSH_LOCK_WAIT_SECONDS for the first.
+PUSH_LOCK_TTL_SECONDS = 300
+PUSH_LOCK_WAIT_SECONDS = 60
+
+
 def _push_item_to_magento(item_code):
     """
     Push a single ERPNext Item to Magento (internal, no permission check).
+
+    Serialised per item: the save-triggered background job, the "Push to
+    Magento" button and the batch/retry syncs can all target the same item at
+    once. Running them in parallel makes both create the product in Magento
+    and race on inserting the Magento Product Map row.
+    """
+    lock = None
+    try:
+        cache = frappe.cache()
+        lock = cache.lock(
+            cache.make_key(f"connector:magento_push:{item_code}"),
+            timeout=PUSH_LOCK_TTL_SECONDS,
+            blocking_timeout=PUSH_LOCK_WAIT_SECONDS,
+        )
+        acquired = lock.acquire()
+    except Exception as e:
+        # Never let a Redis hiccup block syncing; fall back to an unlocked push.
+        frappe.logger("connector").warning(
+            f"push_item_to_magento: could not take push lock for '{item_code}': {e}"
+        )
+        lock = None
+        acquired = True
+
+    if not acquired:
+        message = (
+            f"Another push for '{item_code}' is still running. "
+            "Try again in a minute."
+        )
+        frappe.logger("connector").info(f"push_item_to_magento: {message}")
+        return {"success": False, "error": message}
+
+    try:
+        return _push_item_to_magento_unlocked(item_code)
+    finally:
+        if lock is not None:
+            try:
+                lock.release()
+            except Exception:
+                # Lock already expired (push outlived the TTL); nothing to free.
+                pass
+
+
+def _push_item_to_magento_unlocked(item_code):
+    """
+    The push itself; call via _push_item_to_magento() so it holds the item lock.
     On success: resets the retry counter.
     On failure: increments retry counter and records last_failed_at for backoff.
     """

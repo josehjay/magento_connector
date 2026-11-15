@@ -42,7 +42,13 @@ def upsert_map(
         doc = frappe.new_doc("Magento Product Map")
         doc.item_code = item_code
         doc.update(fields)
-        doc.insert(ignore_permissions=True)
+        try:
+            doc.insert(ignore_permissions=True)
+        except frappe.DuplicateEntryError:
+            # Another worker pushing the same item inserted the row between
+            # our exists() check and insert(). Update it instead of crashing,
+            # which would also hide the original sync error.
+            frappe.db.set_value("Magento Product Map", item_code, fields)
     frappe.db.commit()
 
 
